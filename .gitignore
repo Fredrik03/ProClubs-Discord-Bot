@@ -1,4 +1,5 @@
 venv/
+.venv/
 __pycache__/
 .env
 .DS_Store
@@ -9,5 +10,10 @@ __pycache__/
 .vscode/
 .idea/
 *.log
+
+# Database
+guild_settings.sqlite3
+*.sqlite3
+*.db
 
 
