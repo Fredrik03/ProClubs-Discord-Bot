@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  proclubs-bot:
+    # Option 1: Build from GitHub using Docker's git support
+    build:
+      context: https://github.com/Fredrik03/ProClubs-Discord-Bot.git#main
+      dockerfile: Dockerfile
+    image: proclubs-bot:latest
+    container_name: proclubs-discord-bot
+    restart: unless-stopped
+    
+    environment:
+      - TZ=Europe/Oslo
+      - DISCORD_TOKEN=${DISCORD_TOKEN}
+      - GUILD_ID=${GUILD_ID}
+    
+    volumes:
+      - ./data:/app/data
+    
+    networks:
+      - proclubs-network
+
+networks:
+  proclubs-network:
+    driver: bridge
+
