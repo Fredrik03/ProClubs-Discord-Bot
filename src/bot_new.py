@@ -96,8 +96,17 @@ class ProClubsBot(discord.Client):
                     continue
                 try:
                     info, used_platform = await fetch_club_info(session, platform, club_id)
-                    details = (info.get(str(club_id)) or {}).get("details", {})
-                    club_name = details.get("name", f"Club {club_id}")
+                    # Handle different response formats from EA API
+                    if isinstance(info, list):
+                        club_info = next(
+                            (entry for entry in info if str(entry.get("clubId")) == str(club_id)),
+                            {},
+                        )
+                    elif isinstance(info, dict):
+                        club_info = info.get(str(club_id), {})
+                    else:
+                        club_info = {}
+                    club_name = club_info.get("name", f"Club {club_id}")
 
                     match, mt = await fetch_latest_match(session, used_platform, club_id)
                     if not match or not mt:
