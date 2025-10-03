@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Git
+.git/
+.gitignore
+
+# Database (will be in volume)
+*.sqlite3
+guild_settings.sqlite3
+
+# Backups
+src/BackUp Code/
+
+# Misc
+*.log
+.DS_Store
+
