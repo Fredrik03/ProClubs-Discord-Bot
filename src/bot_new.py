@@ -349,8 +349,60 @@ async def clubstats(interaction: discord.Interaction):
         )
 
 
+async def player_name_autocomplete(
+    interaction: discord.Interaction,
+    current: str,
+) -> list[app_commands.Choice[str]]:
+    """Autocomplete callback for player names."""
+    try:
+        st = get_settings(interaction.guild_id)
+        if not st or not (st.get("club_id") and st.get("platform")):
+            return []
+        
+        club_id = int(st["club_id"])
+        platform = st["platform"]
+        
+        # Fetch members
+        async with aiohttp.ClientSession(timeout=HTTP_TIMEOUT) as session:
+            await warmup_session(session)
+            
+            members_data = await fetch_json(
+                session,
+                "/members/stats",
+                {"clubId": str(club_id), "platform": platform},
+            )
+            
+            if isinstance(members_data, list):
+                members_list = members_data
+            else:
+                members_list = (
+                    members_data.get("members") if isinstance(members_data, dict) else []
+                )
+            
+            members = [m for m in members_list if isinstance(m, dict)]
+            
+            # Filter members based on current input (case-insensitive)
+            current_lower = current.lower()
+            matching_members = [
+                m for m in members 
+                if current_lower in m.get("name", "").lower()
+            ]
+            
+            # Sort by name and limit to 25 (Discord's max)
+            matching_members.sort(key=lambda m: m.get("name", ""))
+            
+            return [
+                app_commands.Choice(name=m.get("name", "Unknown"), value=m.get("name", "Unknown"))
+                for m in matching_members[:25]
+            ]
+    except Exception as e:
+        logger.warning(f"Autocomplete error: {e}")
+        return []
+
+
 @client.tree.command(name="playerstats", description="Show detailed statistics for a specific player")
 @app_commands.describe(player_name="The name of the player to look up")
+@app_commands.autocomplete(player_name=player_name_autocomplete)
 async def playerstats(interaction: discord.Interaction, player_name: str):
     await interaction.response.defer(thinking=True)
     st = get_settings(interaction.guild_id)
