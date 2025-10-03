@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 # Import our modules
 from database import (
     init_db, get_settings, upsert_settings, set_last_match_id,
-    get_all_guild_settings
+    get_all_guild_settings, cache_club_members, get_cached_club_members
 )
 from milestones import check_milestones, announce_milestones
 from utils.ea_api import (
@@ -177,14 +177,24 @@ async def setclub(interaction: discord.Interaction, club: str, gen: app_commands
             # warm up before info call (reduces 403s)
             await warmup_session(session)
             info, used_platform = await fetch_club_info(session, platform, parsed_id)
-            details = (info.get(str(parsed_id)) or {}).get("details", {})
-            name = details.get("name", f"Club {parsed_id}")
+            # Handle different response formats from EA API
+            if isinstance(info, list):
+                club_info = next(
+                    (entry for entry in info if str(entry.get("clubId")) == str(parsed_id)),
+                    {},
+                )
+            elif isinstance(info, dict):
+                club_info = info.get(str(parsed_id), {})
+            else:
+                club_info = {}
+            name = club_info.get("name", f"Club {parsed_id}")
     except Exception as e:
         logger.error(f"Failed to verify club {parsed_id}: {e}", exc_info=True)
         await interaction.followup.send(f"Could not verify club: `{e}`", ephemeral=True)
         return
 
     upsert_settings(interaction.guild_id, club_id=parsed_id, platform=used_platform)
+    logger.info(f"Database write: guild_id={interaction.guild_id}, club_id={parsed_id}, platform={used_platform}")
     logger.info(f"Guild {interaction.guild_id} set club to {name} (ID: {parsed_id}, platform: {used_platform})")
     await interaction.followup.send(f"✅ Club set to **{name}** (ID `{parsed_id}`) on `{used_platform}`.", ephemeral=True)
 
@@ -296,6 +306,12 @@ async def clubstats(interaction: discord.Interaction):
                 )
 
             members = [m for m in members_list if isinstance(m, dict)]
+            
+            # Cache player names for autocomplete
+            player_names = [m.get("name", "") for m in members if m.get("name")]
+            if player_names:
+                cache_club_members(interaction.guild_id, player_names)
+            
             goals = sum(int(m.get("goals", 0) or 0) for m in members)
             assists = sum(int(m.get("assists", 0) or 0) for m in members)
 
@@ -353,48 +369,26 @@ async def player_name_autocomplete(
     interaction: discord.Interaction,
     current: str,
 ) -> list[app_commands.Choice[str]]:
-    """Autocomplete callback for player names."""
+    """Autocomplete callback for player names - uses cached data."""
     try:
-        st = get_settings(interaction.guild_id)
-        if not st or not (st.get("club_id") and st.get("platform")):
-            return []
+        # Get cached player names from database
+        player_names = get_cached_club_members(interaction.guild_id)
         
-        club_id = int(st["club_id"])
-        platform = st["platform"]
+        if not player_names:
+            return [app_commands.Choice(name="No players cached - use /clubstats first", value="")]
         
-        # Fetch members
-        async with aiohttp.ClientSession(timeout=HTTP_TIMEOUT) as session:
-            await warmup_session(session)
-            
-            members_data = await fetch_json(
-                session,
-                "/members/stats",
-                {"clubId": str(club_id), "platform": platform},
-            )
-            
-            if isinstance(members_data, list):
-                members_list = members_data
-            else:
-                members_list = (
-                    members_data.get("members") if isinstance(members_data, dict) else []
-                )
-            
-            members = [m for m in members_list if isinstance(m, dict)]
-            
-            # Filter members based on current input (case-insensitive)
-            current_lower = current.lower()
-            matching_members = [
-                m for m in members 
-                if current_lower in m.get("name", "").lower()
-            ]
-            
-            # Sort by name and limit to 25 (Discord's max)
-            matching_members.sort(key=lambda m: m.get("name", ""))
-            
-            return [
-                app_commands.Choice(name=m.get("name", "Unknown"), value=m.get("name", "Unknown"))
-                for m in matching_members[:25]
-            ]
+        # Filter based on current input (case-insensitive)
+        current_lower = current.lower()
+        matching_names = [
+            name for name in player_names 
+            if current_lower in name.lower()
+        ]
+        
+        # Limit to 25 (Discord's max)
+        return [
+            app_commands.Choice(name=name, value=name)
+            for name in matching_names[:25]
+        ]
     except Exception as e:
         logger.warning(f"Autocomplete error: {e}")
         return []
@@ -445,6 +439,11 @@ async def playerstats(interaction: discord.Interaction, player_name: str):
                 )
 
             members = [m for m in members_list if isinstance(m, dict)]
+            
+            # Cache player names for autocomplete
+            player_names = [m.get("name", "") for m in members if m.get("name")]
+            if player_names:
+                cache_club_members(interaction.guild_id, player_names)
             
             # Find the player (case-insensitive search)
             player = None
@@ -713,6 +712,11 @@ async def leaderboard(interaction: discord.Interaction, category: app_commands.C
                 )
 
             members = [m for m in members_list if isinstance(m, dict)]
+            
+            # Cache player names for autocomplete
+            player_names = [m.get("name", "") for m in members if m.get("name")]
+            if player_names:
+                cache_club_members(interaction.guild_id, player_names)
             
             if not members:
                 await interaction.followup.send("No player data available.", ephemeral=True)
