@@ -1,5 +1,33 @@
 """
 Database functions for guild settings and player milestones.
+
+This module handles all SQLite database operations for the bot.
+
+TABLES:
+-------
+1. settings:
+   - Stores guild configuration (club_id, platform, channel_id, etc.)
+   - Tracks last_match_id to prevent duplicate match posts
+   - One row per Discord guild/server
+
+2. player_milestones:
+   - Records when players achieve milestones (goals, assists, matches, MOTM)
+   - Prevents duplicate milestone announcements
+   - Primary key: (guild_id, player_name, milestone_type, milestone_value)
+
+3. club_members_cache:
+   - Caches player names for autocomplete in slash commands
+   - Updated when /clubstats or /playerstats is run
+   - Improves user experience by showing current roster
+
+DATABASE LOCATION:
+------------------
+data/guild_settings.sqlite3 (relative to project root)
+This directory is used for Docker volume mounting.
+
+LOGGING:
+--------
+All database operations are logged with [Database] prefix for easy debugging.
 """
 import sqlite3
 import logging
@@ -62,61 +90,112 @@ def init_db():
 
 
 def upsert_settings(guild_id: int, **fields):
-    """Update or insert guild settings."""
+    """
+    Update or insert guild settings in the database.
+    Uses SQLite's UPSERT functionality to update existing records or insert new ones.
+    
+    Args:
+        guild_id: Discord guild ID
+        **fields: Any settings fields to update (club_id, platform, channel_id, etc.)
+    """
     fields["updated_at"] = datetime.utcnow().isoformat()
     cols = ", ".join(fields.keys())
     qmarks = ", ".join("?" for _ in fields)
     updates = ", ".join(f"{k}=excluded.{k}" for k in fields)
     
-    logger.info(f"Upserting settings for guild {guild_id}: {fields}")
+    logger.info(f"[Database] Upserting settings for guild {guild_id}: {fields}")
     
-    with sqlite3.connect(DB_PATH) as db:
-        db.execute(
-            f"""
-            INSERT INTO settings (guild_id, {cols})
-            VALUES (?, {qmarks})
-            ON CONFLICT(guild_id) DO UPDATE SET {updates}
-            """,
-            (guild_id, *fields.values()),
-        )
-        db.commit()
-    
-    logger.info(f"Successfully saved settings for guild {guild_id}")
+    try:
+        with sqlite3.connect(DB_PATH) as db:
+            db.execute(
+                f"""
+                INSERT INTO settings (guild_id, {cols})
+                VALUES (?, {qmarks})
+                ON CONFLICT(guild_id) DO UPDATE SET {updates}
+                """,
+                (guild_id, *fields.values()),
+            )
+            db.commit()
+        
+        logger.info(f"[Database] ✅ Successfully saved settings for guild {guild_id}")
+    except Exception as e:
+        logger.error(f"[Database] ❌ Failed to upsert settings for guild {guild_id}: {e}", exc_info=True)
+        raise
 
 
 def get_settings(guild_id: int):
-    """Get guild settings."""
-    with sqlite3.connect(DB_PATH) as db:
-        cur = db.execute(
-            "SELECT guild_id, club_id, platform, channel_id, last_match_id, autopost, milestone_channel_id FROM settings WHERE guild_id=?",
-            (guild_id,),
-        )
-        row = cur.fetchone()
-        if not row:
-            logger.debug(f"No settings found for guild {guild_id}")
-            return None
-        keys = ["guild_id", "club_id", "platform", "channel_id", "last_match_id", "autopost", "milestone_channel_id"]
-        result = dict(zip(keys, row))
-        logger.debug(f"Retrieved settings for guild {guild_id}: club_id={result.get('club_id')}, platform={result.get('platform')}")
-        return result
+    """
+    Retrieve guild settings from the database.
+    
+    Args:
+        guild_id: Discord guild ID
+    
+    Returns:
+        Dictionary with guild settings or None if not found
+    """
+    logger.debug(f"[Database] Fetching settings for guild {guild_id}")
+    try:
+        with sqlite3.connect(DB_PATH) as db:
+            cur = db.execute(
+                "SELECT guild_id, club_id, platform, channel_id, last_match_id, autopost, milestone_channel_id FROM settings WHERE guild_id=?",
+                (guild_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                logger.debug(f"[Database] No settings found for guild {guild_id}")
+                return None
+            keys = ["guild_id", "club_id", "platform", "channel_id", "last_match_id", "autopost", "milestone_channel_id"]
+            result = dict(zip(keys, row))
+            logger.debug(f"[Database] Retrieved settings for guild {guild_id}: club_id={result.get('club_id')}, platform={result.get('platform')}, autopost={result.get('autopost')}")
+            return result
+    except Exception as e:
+        logger.error(f"[Database] ❌ Failed to get settings for guild {guild_id}: {e}", exc_info=True)
+        raise
 
 
 def set_last_match_id(guild_id: int, match_id: str):
-    """Update the last posted match ID for a guild."""
-    with sqlite3.connect(DB_PATH) as db:
-        db.execute(
-            "UPDATE settings SET last_match_id=?, updated_at=? WHERE guild_id=?",
-            (match_id, datetime.utcnow().isoformat(), guild_id),
-        )
+    """
+    Update the last posted match ID for a guild.
+    This prevents the same match from being posted multiple times.
+    
+    Args:
+        guild_id: Discord guild ID
+        match_id: Match ID from EA API to store
+    """
+    logger.debug(f"[Database] Updating last_match_id for guild {guild_id} to {match_id}")
+    try:
+        with sqlite3.connect(DB_PATH) as db:
+            db.execute(
+                "UPDATE settings SET last_match_id=?, updated_at=? WHERE guild_id=?",
+                (match_id, datetime.utcnow().isoformat(), guild_id),
+            )
+            db.commit()
+        logger.info(f"[Database] ✅ Updated last_match_id for guild {guild_id} to {match_id}")
+    except Exception as e:
+        logger.error(f"[Database] ❌ Failed to update last_match_id for guild {guild_id}: {e}", exc_info=True)
+        raise
 
 
 def get_all_guild_settings():
-    """Get settings for all guilds (for polling)."""
-    with sqlite3.connect(DB_PATH) as db:
-        cur = db.execute(
-            "SELECT guild_id, club_id, platform, channel_id, last_match_id, autopost FROM settings"
-        )
-        return cur.fetchall()
+    """
+    Get settings for all guilds configured in the database.
+    Used by the match polling loop to check all guilds for new matches.
+    
+    Returns:
+        List of tuples: (guild_id, club_id, platform, channel_id, last_match_id, autopost)
+    """
+    logger.debug("[Database] Fetching settings for all guilds")
+    try:
+        with sqlite3.connect(DB_PATH) as db:
+            cur = db.execute(
+                "SELECT guild_id, club_id, platform, channel_id, last_match_id, autopost FROM settings"
+            )
+            rows = cur.fetchall()
+        logger.debug(f"[Database] Found {len(rows)} guild(s) in database")
+        return rows
+    except Exception as e:
+        logger.error(f"[Database] ❌ Failed to get all guild settings: {e}", exc_info=True)
+        raise
 
 
 def has_milestone_been_announced(guild_id: int, player_name: str, milestone_type: str, milestone_value: int) -> bool:
@@ -142,17 +221,31 @@ def record_milestone(guild_id: int, player_name: str, milestone_type: str, miles
 
 
 def cache_club_members(guild_id: int, player_names: list[str]):
-    """Cache club member names for a guild."""
-    with sqlite3.connect(DB_PATH) as db:
-        # Clear old cache for this guild
-        db.execute("DELETE FROM club_members_cache WHERE guild_id=?", (guild_id,))
-        
-        # Insert new cache
-        now = datetime.utcnow().isoformat()
-        db.executemany(
-            "INSERT INTO club_members_cache (guild_id, player_name, cached_at) VALUES (?, ?, ?)",
-            [(guild_id, name, now) for name in player_names],
-        )
+    """
+    Cache club member names for autocomplete in slash commands.
+    This is updated whenever /clubstats or /playerstats is called.
+    
+    Args:
+        guild_id: Discord guild ID
+        player_names: List of player names to cache
+    """
+    logger.debug(f"[Database] Caching {len(player_names)} player names for guild {guild_id}")
+    try:
+        with sqlite3.connect(DB_PATH) as db:
+            # Clear old cache for this guild
+            db.execute("DELETE FROM club_members_cache WHERE guild_id=?", (guild_id,))
+            
+            # Insert new cache
+            now = datetime.utcnow().isoformat()
+            db.executemany(
+                "INSERT INTO club_members_cache (guild_id, player_name, cached_at) VALUES (?, ?, ?)",
+                [(guild_id, name, now) for name in player_names],
+            )
+            db.commit()
+        logger.debug(f"[Database] ✅ Cached player names for guild {guild_id}")
+    except Exception as e:
+        logger.error(f"[Database] ❌ Failed to cache club members for guild {guild_id}: {e}", exc_info=True)
+        raise
 
 
 def get_cached_club_members(guild_id: int) -> list[str]:

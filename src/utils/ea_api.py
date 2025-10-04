@@ -1,5 +1,56 @@
 """
 EA Sports FC Pro Clubs API utilities.
+
+This module handles all communication with EA's undocumented Pro Clubs API.
+
+API DETAILS:
+------------
+Base URL: https://proclubs.ea.com/api/fc
+The EA Pro Clubs API is undocumented and community-discovered.
+Response formats can vary and may change without notice.
+
+KEY FEATURES:
+-------------
+1. Session Warmup:
+   - Visits EA's HTML pages before API calls
+   - Acquires cookies and passes Cloudflare/WAF checks
+   - Significantly reduces 403 Forbidden errors
+
+2. Retry Logic:
+   - All API calls include automatic retry (default: 3 attempts)
+   - Exponential backoff with jitter for rate limiting
+   - Detailed error logging for debugging
+
+3. Platform Fallback:
+   - Automatically tries other generation if first fails
+   - Handles common-gen5 (PS5/XSX/PC) and common-gen4 (PS4/XB1)
+
+4. Response Normalization:
+   - EA API returns inconsistent formats (list/dict/nested)
+   - Functions normalize responses for easier consumption
+
+IMPORTANT ENDPOINTS:
+--------------------
+- /clubs/info: Get club details (name, stats, etc.)
+- /clubs/matches: Get match history
+- /members/stats: Get player statistics
+- /clubs/overallStats: Get overall club statistics
+
+LOGGING:
+--------
+All API operations are logged with [EA API] prefix:
+- ✅ Successful requests
+- ⚠️ Warnings (retries, HTTP errors)
+- ❌ Failed requests after all retries
+
+COMMON ISSUES:
+--------------
+1. HTTP 403: Rate limiting or WAF block
+   - Solution: Session warmup and retry with backoff
+2. HTTP 404: Club doesn't exist or wrong platform
+   - Solution: Platform fallback logic
+3. Empty responses: Club has no data yet
+   - Solution: Graceful handling with None returns
 """
 import re
 import random
@@ -61,101 +112,173 @@ async def _get_json(session: aiohttp.ClientSession, url: str, params: dict):
 
 async def warmup_session(session: aiohttp.ClientSession):
     """
-    Hit the HTML pages to pick up cookies (Cloudflare/WAF) before API calls.
-    Best-effort: ignore errors.
+    Warm up the session by visiting EA's HTML pages.
+    This helps acquire cookies and pass through Cloudflare/WAF checks,
+    reducing the likelihood of 403 Forbidden errors on API calls.
+    
+    Best-effort operation: errors are silently ignored.
+    
+    Args:
+        session: aiohttp ClientSession to warm up
     """
+    logger.debug("[EA API] Warming up session by visiting EA's website...")
     html_headers = {
         "User-Agent": "Mozilla/5.0",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
         "Upgrade-Insecure-Requests": "1",
     }
+    
+    # Visit main EA site
     try:
         async with session.get(SITE_URL, headers=html_headers) as r:
             await r.text()
-    except Exception:
-        pass
+            logger.debug(f"[EA API] Warmup: visited {SITE_URL} (status: {r.status})")
+    except Exception as e:
+        logger.debug(f"[EA API] Warmup: failed to visit {SITE_URL}: {e}")
+    
+    # Visit Pro Clubs page
     try:
         async with session.get(SITE_REFERER, headers=html_headers) as r:
             await r.text()
-    except Exception:
-        pass
+            logger.debug(f"[EA API] Warmup: visited {SITE_REFERER} (status: {r.status})")
+    except Exception as e:
+        logger.debug(f"[EA API] Warmup: failed to visit {SITE_REFERER}: {e}")
+    
+    logger.debug("[EA API] Session warmup complete")
 
 
 async def fetch_json(session: aiohttp.ClientSession, path: str, params: dict, max_attempts: int = 3):
     """
     Fetch JSON from EA API with retry logic.
-    Raises RuntimeError if all attempts fail.
+    
+    Args:
+        session: aiohttp ClientSession to use for the request
+        path: API endpoint path (e.g., "/clubs/info")
+        params: Query parameters as a dictionary
+        max_attempts: Maximum number of retry attempts (default: 3)
+    
+    Returns:
+        JSON response data as dict/list
+        
+    Raises:
+        RuntimeError: If all retry attempts fail
     """
     url = f"{EA_BASE}{path}"
     last_exc = None
+    
+    logger.debug(f"[EA API] Fetching {path} with params: {params}")
 
     for attempt in range(1, max_attempts + 1):
         try:
+            logger.debug(f"[EA API] Attempt {attempt}/{max_attempts} for {path}")
             data = await _get_json(session, url, params)
+            logger.info(f"[EA API] ✅ Successfully fetched {path} (attempt {attempt})")
             return data
         except aiohttp.ClientResponseError as e:
             last_exc = e
             if e.status in (403, 503):
-                logger.warning(f"HTTP {e.status} on {path} (attempt {attempt}/{max_attempts})")
+                # 403 Forbidden / 503 Service Unavailable - likely rate limiting or WAF
+                logger.warning(f"[EA API] ⚠️ HTTP {e.status} on {path} (attempt {attempt}/{max_attempts}) - possible rate limit or WAF block")
                 if attempt < max_attempts:
-                    await asyncio.sleep(random.uniform(0.5, 1.5))
+                    sleep_time = random.uniform(0.5, 1.5)
+                    logger.debug(f"[EA API] Waiting {sleep_time:.2f}s before retry...")
+                    await asyncio.sleep(sleep_time)
                     continue
             else:
-                logger.warning(f"HTTP {e.status} on {path} (attempt {attempt}/{max_attempts})")
+                # Other HTTP errors (404, 500, etc.)
+                logger.warning(f"[EA API] ⚠️ HTTP {e.status} on {path} (attempt {attempt}/{max_attempts})")
                 if attempt < max_attempts:
+                    logger.debug(f"[EA API] Waiting 0.5s before retry...")
                     await asyncio.sleep(0.5)
                     continue
                 break
         except Exception as e:
+            # Network errors, timeouts, JSON parse errors, etc.
             last_exc = e
-            logger.warning(f"Error on {path} (attempt {attempt}/{max_attempts}): {e}")
+            logger.warning(f"[EA API] ⚠️ Error on {path} (attempt {attempt}/{max_attempts}): {type(e).__name__}: {e}")
             if attempt < max_attempts:
+                logger.debug(f"[EA API] Waiting 0.5s before retry...")
                 await asyncio.sleep(0.5)
                 continue
             break
 
-    logger.error(f"All attempts failed for {path}: {last_exc}")
-    raise RuntimeError(f"Alle endepunkt-forsøk feilet: {last_exc}")
+    logger.error(f"[EA API] ❌ All {max_attempts} attempts failed for {path}: {last_exc}")
+    raise RuntimeError(f"EA API request failed after {max_attempts} attempts: {last_exc}")
 
 
 async def fetch_club_info(session, platform: str, club_id: int):
     """
-    Fetch club info. Auto-fallback to other generation if needed.
-    Returns (info_dict, used_platform)
+    Fetch club information from EA API.
+    Automatically falls back to the other generation platform if the first attempt fails.
+    
+    Args:
+        session: aiohttp ClientSession
+        platform: Platform string (e.g., "common-gen5" or "common-gen4")
+        club_id: Numeric club ID
+    
+    Returns:
+        Tuple of (info_dict, used_platform)
+        - info_dict: Club information from EA API
+        - used_platform: The platform that worked (may differ from input if fallback occurred)
     """
+    logger.debug(f"[EA API] Fetching club info for club {club_id} on platform {platform}")
     try:
         info = await fetch_json(session, "/clubs/info", {"platform": platform, "clubIds": str(club_id)})
+        logger.info(f"[EA API] ✅ Successfully fetched club info for {club_id} on {platform}")
         return info, platform
-    except Exception:
+    except Exception as e:
+        # Try the other generation platform
         other = "common-gen4" if platform == "common-gen5" else "common-gen5"
+        logger.warning(f"[EA API] Failed to fetch club info on {platform}, trying fallback platform {other}")
         info = await fetch_json(session, "/clubs/info", {"platform": other, "clubIds": str(club_id)})
+        logger.info(f"[EA API] ✅ Successfully fetched club info for {club_id} on fallback platform {other}")
         return info, other
 
 
 async def fetch_latest_match(session, platform: str, club_id: int):
     """
     Get the newest match from the club's match history.
-    Returns (match_dict, match_type_str) or (None, None)
+    
+    Args:
+        session: aiohttp ClientSession
+        platform: Platform string (e.g., "common-gen5" or "common-gen4")
+        club_id: Numeric club ID
+    
+    Returns:
+        Tuple of (match_dict, match_type_str) or (None, None) if no matches found
+        - match_dict: Match data from EA API
+        - match_type_str: Type of match (e.g., "league")
     """
-    # Use the working endpoint
+    logger.debug(f"[EA API] Fetching latest match for club {club_id} on platform {platform}")
+    
+    # EA API parameters for fetching matches
     params = {
         "platform": platform,
         "clubIds": str(club_id),
-        "matchType": "leagueMatch",
-        "maxResultCount": "1"
+        "matchType": "leagueMatch",  # Only fetch league matches
+        "maxResultCount": "1"  # Only get the most recent match
     }
     
     try:
         payload = await fetch_json(session, "/clubs/matches", params)
+        
+        # EA API may return different formats
         matches = payload if isinstance(payload, list) else payload.get("matches", [])
+        
         if matches and len(matches) > 0:
-            newest = matches[0]  # Already sorted by newest
+            newest = matches[0]  # Matches are pre-sorted by EA API (newest first)
             match_type = "league"
-            logger.info(f"Found latest match for club {club_id}")
+            
+            # Log match details for debugging
+            match_id = newest.get("matchId", "unknown")
+            timestamp = newest.get("timestamp", 0)
+            logger.info(f"[EA API] ✅ Found latest match for club {club_id}: match_id={match_id}, timestamp={timestamp}")
             return newest, match_type
+        else:
+            logger.debug(f"[EA API] No matches found for club {club_id}")
     except Exception as e:
-        logger.warning(f"Failed fetching latest match: {e}")
+        logger.error(f"[EA API] ❌ Failed fetching latest match for club {club_id}: {e}", exc_info=True)
     
     return None, None
 

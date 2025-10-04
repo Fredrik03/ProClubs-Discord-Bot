@@ -1,6 +1,49 @@
 """
 EA Sports FC Pro Clubs Discord Bot
 Refactored for better maintainability
+
+ARCHITECTURE OVERVIEW:
+----------------------
+This bot automatically posts Pro Clubs match results to Discord and provides
+slash commands for viewing club and player statistics.
+
+KEY COMPONENTS:
+1. Match Polling System (poll_once_all_guilds):
+   - Runs every 60 seconds in the background
+   - Fetches latest match from EA API for each configured guild
+   - Compares match ID with last posted match
+   - Posts new matches to configured Discord channel
+   - Updates database with new match ID to prevent duplicates
+
+2. Database (database.py):
+   - SQLite database storing guild settings (club_id, platform, channel_id, etc.)
+   - Tracks last posted match ID per guild
+   - Caches player names for autocomplete
+   - Stores player milestone achievements
+
+3. EA API Client (utils/ea_api.py):
+   - Handles all communication with EA's Pro Clubs API
+   - Includes retry logic and error handling
+   - Session warmup to bypass Cloudflare/WAF protection
+   - Auto-fallback between gen5/gen4 platforms
+
+4. Slash Commands:
+   - /setclub: Configure which club to track
+   - /setmatchchannel: Set where matches are posted
+   - /clubstats: View overall club statistics
+   - /playerstats: View individual player stats
+   - /lastmatches: View recent match history
+   - /leaderboard: View player leaderboards
+
+LOGGING:
+--------
+All operations are logged with descriptive prefixes:
+- [Command: <name>] - Slash command execution
+- [Guild <id>] - Match polling per guild
+- [EA API] - API requests and responses
+- [Database] - Database operations
+
+Use these prefixes to quickly identify issues in the console logs.
 """
 import os
 import re
@@ -82,21 +125,40 @@ class ProClubsBot(discord.Client):
             await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
     async def poll_once_all_guilds(self):
-        """Poll all guilds for new matches."""
+        """
+        Poll all configured guilds for new matches.
+        This runs every POLL_INTERVAL_SECONDS (60s by default).
+        """
+        # Fetch all guild settings from database
         rows = get_all_guild_settings()
         
         if not rows:
+            logger.info("No guild settings found for match polling")
             return
+        
+        logger.info(f"Polling {len(rows)} guild(s) for new matches")
 
         async with aiohttp.ClientSession(timeout=HTTP_TIMEOUT) as session:
-            # Warm up once per loop (cookies) to reduce 403s
+            # Warm up session: visit EA's site to get cookies/pass Cloudflare
+            # This helps prevent 403 errors when making API calls
+            logger.debug("Warming up session for EA API...")
             await warmup_session(session)
+            
+            # Process each guild's settings
             for (guild_id, club_id, platform, channel_id, last_match_id, autopost) in rows:
+                logger.info(f"Checking guild {guild_id}: club_id={club_id}, platform={platform}, channel_id={channel_id}, autopost={autopost}, last_match_id={last_match_id}")
+                
+                # Verify all required settings are present
                 if not (club_id and platform and channel_id and autopost):
+                    logger.warning(f"Guild {guild_id} missing required settings (club_id={club_id}, platform={platform}, channel_id={channel_id}, autopost={autopost})")
                     continue
+                
                 try:
+                    # Step 1: Fetch club info to get club name
+                    logger.debug(f"[Guild {guild_id}] Fetching club info for club {club_id}...")
                     info, used_platform = await fetch_club_info(session, platform, club_id)
-                    # Handle different response formats from EA API
+                    
+                    # EA API returns different formats, normalize to dict
                     if isinstance(info, list):
                         club_info = next(
                             (entry for entry in info if str(entry.get("clubId")) == str(club_id)),
@@ -107,30 +169,52 @@ class ProClubsBot(discord.Client):
                     else:
                         club_info = {}
                     club_name = club_info.get("name", f"Club {club_id}")
+                    logger.debug(f"[Guild {guild_id}] Found club: {club_name}")
 
+                    # Step 2: Fetch the latest match from EA API
+                    logger.debug(f"[Guild {guild_id}] Fetching latest match...")
                     match, mt = await fetch_latest_match(session, used_platform, club_id)
+                    
                     if not match or not mt:
+                        logger.debug(f"[Guild {guild_id}] No matches found or no match data available")
                         continue
 
+                    # Step 3: Extract match ID (EA API format is inconsistent)
                     match_id = match.get("matchJson")
                     if isinstance(match_id, str) and '"matchId":"' in match_id:
                         try:
                             match_id = re.search(r'"matchId":"(\d+)"', match_id).group(1)
+                            logger.debug(f"[Guild {guild_id}] Extracted match ID from JSON string: {match_id}")
                         except Exception:
                             match_id = None
                     elif isinstance(match_id, dict):
                         match_id = match_id.get("matchId")
+                        logger.debug(f"[Guild {guild_id}] Extracted match ID from dict: {match_id}")
+                    
+                    # Fallback to direct matchId field
                     match_id = match.get("matchId", match_id)
+                    
+                    # Last resort: create composite ID from timestamp and score
                     if not match_id:
                         match_id = f"{match.get('timestamp', 0)}:{match.get('homeScore', '?')}-{match.get('awayScore', '?')}"
+                        logger.debug(f"[Guild {guild_id}] Using fallback match ID: {match_id}")
+                    
+                    logger.info(f"[Guild {guild_id}] Latest match ID: {match_id}")
 
+                    # Step 4: Check if we've already posted this match
                     if str(match_id) == str(last_match_id):
+                        logger.debug(f"[Guild {guild_id}] Match {match_id} already posted, skipping")
                         continue  # already posted
 
+                    # Step 5: Get the Discord channel to post to
+                    logger.debug(f"[Guild {guild_id}] New match detected! Fetching Discord channel {channel_id}...")
                     channel = self.get_channel(int(channel_id))
                     if channel is None:
+                        logger.error(f"[Guild {guild_id}] Could not find channel {channel_id} - bot may not have access")
                         continue
 
+                    # Step 6: Build the match embed and post it
+                    logger.debug(f"[Guild {guild_id}] Building match embed...")
                     embed = build_match_embed(
                         club_id,
                         used_platform,
@@ -138,11 +222,16 @@ class ProClubsBot(discord.Client):
                         mt,
                         club_name_hint=club_name,
                     )
+                    
+                    logger.info(f"[Guild {guild_id}] Posting new match {match_id} to channel {channel.name} ({channel_id})")
                     await channel.send(embed=embed)
+                    
+                    # Step 7: Update database with new match ID
                     set_last_match_id(guild_id, str(match_id))
-                    logger.info(f"Posted new match {match_id} for guild {guild_id}")
+                    logger.info(f"✅ [Guild {guild_id}] Successfully posted match {match_id} and updated database")
+                    
                 except Exception as e:  # noqa: BLE001
-                    logger.error(f"Error polling guild {guild_id}: {e}", exc_info=True)
+                    logger.error(f"❌ [Guild {guild_id}] Error polling guild: {e}", exc_info=True)
 
 
 client = ProClubsBot()
@@ -161,23 +250,36 @@ client = ProClubsBot()
     ],
 )
 async def setclub(interaction: discord.Interaction, club: str, gen: app_commands.Choice[str]):
+    """
+    Command: /setclub
+    Sets the Pro Club to track for this Discord server.
+    Accepts either a numeric club ID or an EA URL containing clubId=...
+    """
     await interaction.response.defer(ephemeral=True)
-    logger.info(f"User {interaction.user} executing /setclub with club='{club}' gen='{gen.value}'")
+    logger.info(f"[Command: setclub] User {interaction.user} (ID: {interaction.user.id}) in guild {interaction.guild_id} executing /setclub with club='{club}' gen='{gen.value}'")
     
+    # Parse the club ID from input (handles both numeric IDs and EA URLs)
     parsed_id = parse_club_id_from_any(club)
     if not parsed_id:
-        logger.warning(f"Invalid club input: {club}")
+        logger.warning(f"[Command: setclub] Invalid club input from user {interaction.user}: '{club}'")
         await interaction.followup.send("Invalid input. Provide a number (clubId) or an EA URL containing `clubId=...`.", ephemeral=True)
         return
 
+    # Convert generation choice to platform string
     platform = platform_from_choice(gen.value)
+    logger.debug(f"[Command: setclub] Parsed club ID: {parsed_id}, platform: {platform}")
 
     try:
         async with aiohttp.ClientSession(timeout=HTTP_TIMEOUT) as session:
-            # warm up before info call (reduces 403s)
+            # Warm up session before making API calls to reduce 403 errors
+            logger.debug(f"[Command: setclub] Warming up session for EA API...")
             await warmup_session(session)
+            
+            # Verify the club exists by fetching its info from EA API
+            logger.debug(f"[Command: setclub] Fetching club info for club {parsed_id}...")
             info, used_platform = await fetch_club_info(session, platform, parsed_id)
-            # Handle different response formats from EA API
+            
+            # EA API returns different formats, normalize to dict
             if isinstance(info, list):
                 club_info = next(
                     (entry for entry in info if str(entry.get("clubId")) == str(parsed_id)),
@@ -188,40 +290,66 @@ async def setclub(interaction: discord.Interaction, club: str, gen: app_commands
             else:
                 club_info = {}
             name = club_info.get("name", f"Club {parsed_id}")
+            logger.info(f"[Command: setclub] Successfully verified club: {name} (ID: {parsed_id})")
     except Exception as e:
-        logger.error(f"Failed to verify club {parsed_id}: {e}", exc_info=True)
+        logger.error(f"[Command: setclub] Failed to verify club {parsed_id}: {e}", exc_info=True)
         await interaction.followup.send(f"Could not verify club: `{e}`", ephemeral=True)
         return
 
+    # Save club settings to database
+    logger.debug(f"[Command: setclub] Saving settings to database: guild_id={interaction.guild_id}, club_id={parsed_id}, platform={used_platform}")
     upsert_settings(interaction.guild_id, club_id=parsed_id, platform=used_platform)
-    logger.info(f"Database write: guild_id={interaction.guild_id}, club_id={parsed_id}, platform={used_platform}")
-    logger.info(f"Guild {interaction.guild_id} set club to {name} (ID: {parsed_id}, platform: {used_platform})")
+    logger.info(f"✅ [Command: setclub] Guild {interaction.guild_id} set club to {name} (ID: {parsed_id}, platform: {used_platform})")
     await interaction.followup.send(f"✅ Club set to **{name}** (ID `{parsed_id}`) on `{used_platform}`.", ephemeral=True)
 
 
 @client.tree.command(name="setmatchchannel", description="Choose the channel where new matches will be posted.")
 @app_commands.describe(channel="Channel to receive new match posts")
 async def setmatchchannel(interaction: discord.Interaction, channel: discord.TextChannel):
+    """
+    Command: /setmatchchannel
+    Sets the Discord channel where new match results will be automatically posted.
+    Requires that /setclub has been run first.
+    """
     await interaction.response.defer(ephemeral=True)
+    logger.info(f"[Command: setmatchchannel] User {interaction.user} (ID: {interaction.user.id}) in guild {interaction.guild_id} setting match channel to #{channel.name} (ID: {channel.id})")
+    
+    # Check if club has been configured first
     st = get_settings(interaction.guild_id)
     if not st or not st.get("club_id"):
+        logger.warning(f"[Command: setmatchchannel] Guild {interaction.guild_id} tried to set match channel without setting club first")
         await interaction.followup.send("Set a club first with `/setclub`.", ephemeral=True)
         return
 
+    # Save channel settings and enable autopost
+    logger.debug(f"[Command: setmatchchannel] Saving match channel to database: guild_id={interaction.guild_id}, channel_id={channel.id}, autopost=1")
     upsert_settings(interaction.guild_id, channel_id=channel.id, autopost=1)
+    logger.info(f"✅ [Command: setmatchchannel] Guild {interaction.guild_id} set match channel to #{channel.name} (ID: {channel.id}), autopost enabled")
     await interaction.followup.send(f"✅ New matches will be posted in {channel.mention}.", ephemeral=True)
 
 
 @client.tree.command(name="setmilestonechannel", description="Set the channel for milestone announcements.")
 @app_commands.describe(channel="Channel to receive milestone notifications")
 async def setmilestonechannel(interaction: discord.Interaction, channel: discord.TextChannel):
+    """
+    Command: /setmilestonechannel
+    Sets the Discord channel where player milestone achievements will be posted.
+    Milestones include goals, assists, matches played, and MOTM awards.
+    """
     await interaction.response.defer(ephemeral=True)
+    logger.info(f"[Command: setmilestonechannel] User {interaction.user} in guild {interaction.guild_id} setting milestone channel to #{channel.name} (ID: {channel.id})")
+    
+    # Check if club has been configured first
     st = get_settings(interaction.guild_id)
     if not st or not st.get("club_id"):
+        logger.warning(f"[Command: setmilestonechannel] Guild {interaction.guild_id} tried to set milestone channel without setting club first")
         await interaction.followup.send("Set a club first with `/setclub`.", ephemeral=True)
         return
 
+    # Save milestone channel settings
+    logger.debug(f"[Command: setmilestonechannel] Saving milestone channel to database: guild_id={interaction.guild_id}, milestone_channel_id={channel.id}")
     upsert_settings(interaction.guild_id, milestone_channel_id=channel.id)
+    logger.info(f"✅ [Command: setmilestonechannel] Guild {interaction.guild_id} set milestone channel to #{channel.name} (ID: {channel.id})")
     await interaction.followup.send(
         f"✅ Milestone notifications will be posted in {channel.mention}.\n\n"
         f"**Milestones tracked:**\n"
@@ -235,14 +363,24 @@ async def setmilestonechannel(interaction: discord.Interaction, channel: discord
 
 @client.tree.command(name="clubstats", description="Show overall club statistics")
 async def clubstats(interaction: discord.Interaction):
+    """
+    Command: /clubstats
+    Displays overall club statistics including record, goals, assists, and top players.
+    Also checks for any new player milestones achieved.
+    """
     await interaction.response.defer(thinking=True)
+    logger.info(f"[Command: clubstats] User {interaction.user} in guild {interaction.guild_id} requesting club stats")
+    
+    # Check if club has been configured
     st = get_settings(interaction.guild_id)
     if not st or not (st.get("club_id") and st.get("platform")):
+        logger.warning(f"[Command: clubstats] Guild {interaction.guild_id} tried to view stats without setting club first")
         await interaction.followup.send("Set a club first with `/setclub`.", ephemeral=True)
         return
 
     club_id = int(st["club_id"])
     platform = st["platform"]
+    logger.debug(f"[Command: clubstats] Fetching stats for club {club_id} on platform {platform}")
 
     try:
         async with aiohttp.ClientSession(timeout=HTTP_TIMEOUT) as session:
@@ -311,9 +449,11 @@ async def clubstats(interaction: discord.Interaction):
             player_names = [m.get("name", "") for m in members if m.get("name")]
             if player_names:
                 cache_club_members(interaction.guild_id, player_names)
+                logger.debug(f"[Command: clubstats] Cached {len(player_names)} player names for autocomplete")
             
             goals = sum(int(m.get("goals", 0) or 0) for m in members)
             assists = sum(int(m.get("assists", 0) or 0) for m in members)
+            logger.debug(f"[Command: clubstats] Found {len(members)} members, total goals: {goals}, total assists: {assists}")
 
             embed = discord.Embed(
                 title=f"📊 {name}",
