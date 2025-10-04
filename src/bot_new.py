@@ -67,7 +67,9 @@ from utils.ea_api import (
     fetch_club_info, fetch_latest_match, fetch_json, HTTP_TIMEOUT,
     fetch_all_matches, calculate_player_wld
 )
-from utils.embeds import build_match_embed, utc_to_str
+from utils.embeds import build_match_embed, utc_to_str, prepare_match_card_data
+from utils.stats_cards import create_match_card
+from utils.stats_cards_v2 import create_match_card_v2
 
 # ---------- logging ----------
 logging.basicConfig(
@@ -213,18 +215,38 @@ class ProClubsBot(discord.Client):
                         logger.error(f"[Guild {guild_id}] Could not find channel {channel_id} - bot may not have access")
                         continue
 
-                    # Step 6: Build the match embed and post it
-                    logger.debug(f"[Guild {guild_id}] Building match embed...")
-                    embed = build_match_embed(
-                        club_id,
-                        used_platform,
-                        match,
-                        mt,
-                        club_name_hint=club_name,
-                    )
+                    # Step 6: Build the match card (image) and post it
+                    logger.debug(f"[Guild {guild_id}] Building match stat card...")
                     
-                    logger.info(f"[Guild {guild_id}] Posting new match {match_id} to channel {channel.name} ({channel_id})")
-                    await channel.send(embed=embed)
+                    try:
+                        # Prepare data for stat card
+                        card_data = prepare_match_card_data(
+                            club_id,
+                            used_platform,
+                            match,
+                            club_name_hint=club_name
+                        )
+                        
+                        # Generate the stat card image (V2 design)
+                        card_image = create_match_card_v2(**card_data)
+                        
+                        # Create Discord file
+                        file = discord.File(card_image, filename="match_result.png")
+                        
+                        logger.info(f"[Guild {guild_id}] Posting new match {match_id} to channel {channel.name} ({channel_id})")
+                        await channel.send(file=file)
+                        
+                    except Exception as card_error:
+                        # Fallback to embed if card generation fails
+                        logger.warning(f"[Guild {guild_id}] Failed to create stat card, falling back to embed: {card_error}")
+                        embed = build_match_embed(
+                            club_id,
+                            used_platform,
+                            match,
+                            mt,
+                            club_name_hint=club_name,
+                        )
+                        await channel.send(embed=embed)
                     
                     # Step 7: Update database with new match ID
                     set_last_match_id(guild_id, str(match_id))
@@ -947,6 +969,79 @@ async def leaderboard(interaction: discord.Interaction, category: app_commands.C
         logger.error(f"Error fetching leaderboard: {e}", exc_info=True)
         await interaction.followup.send(
             f"Could not fetch leaderboard right now. Error: {e}", ephemeral=True
+        )
+
+
+@client.tree.command(name="testcard", description="🎨 Preview a stat card with demo data")
+async def testcard(interaction: discord.Interaction):
+    """
+    Command: /testcard
+    Generates a demo stat card to preview the design.
+    Useful for testing and seeing what match cards look like!
+    """
+    await interaction.response.defer(thinking=True)
+    logger.info(f"[Command: testcard] User {interaction.user} in guild {interaction.guild_id} requesting test card")
+    
+    try:
+        # Create demo match data
+        demo_data = {
+            "club_name": "YOUR CLUB",
+            "opponent_name": "RIVAL CLUB",
+            "club_score": 5,
+            "opponent_score": 3,
+            "result": "win",
+            "players": [
+                {
+                    "name": "Superstar Player",
+                    "position": "ST",
+                    "goals": 3,
+                    "assists": 1,
+                    "rating": 9.2,
+                    "motm": True
+                },
+                {
+                    "name": "Midfield Maestro",
+                    "position": "CAM",
+                    "goals": 1,
+                    "assists": 3,
+                    "rating": 8.8,
+                    "motm": False
+                },
+                {
+                    "name": "Solid Defender",
+                    "position": "CB",
+                    "goals": 1,
+                    "assists": 0,
+                    "rating": 8.5,
+                    "motm": False
+                }
+            ],
+            "match_time": "Just now (Demo)",
+            "platform": "common-gen5"
+        }
+        
+        # Generate the stat card (V2 design)
+        logger.debug("[Command: testcard] Generating demo stat card V2...")
+        card_image = create_match_card_v2(**demo_data)
+        
+        # Create Discord file
+        file = discord.File(card_image, filename="demo_match_card.png")
+        
+        # Send with a message
+        await interaction.followup.send(
+            "🎨 **Here's a preview of your stat cards!**\n"
+            "This is what your match results will look like when posted automatically.\n"
+            "Pretty sick, right? 🔥",
+            file=file
+        )
+        logger.info(f"✅ [Command: testcard] Demo card sent successfully to user {interaction.user}")
+        
+    except Exception as e:
+        logger.error(f"[Command: testcard] Failed to create demo card: {e}", exc_info=True)
+        await interaction.followup.send(
+            f"❌ Could not generate test card. Error: {e}\n"
+            f"Make sure Pillow is installed: `pip install Pillow==10.4.0`",
+            ephemeral=True
         )
 
 

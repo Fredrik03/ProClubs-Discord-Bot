@@ -1,8 +1,21 @@
 # EA FC 26 Pro Clubs Discord Bot
 
-A feature-rich Discord bot that tracks EA FC 26 Pro Clubs matches and displays comprehensive team & player statistics with beautiful embeds.
+A feature-rich Discord bot that tracks EA FC 26 Pro Clubs matches and displays comprehensive team & player statistics with **stunning visual stat cards** and detailed embeds.
 
 ## ✨ Features
+
+### 🎨 **NEW: Beautiful Stat Cards!**
+
+Match results are now posted as **gorgeous image-based stat cards** featuring:
+- 🎯 Modern dark theme with gradient backgrounds
+- 🏆 Color-coded results (🟢 Win / 🔴 Loss / 🟡 Draw)
+- 👥 Top 3 performers with 🥇🥈🥉 medals
+- ⚽ Goals, 🅰️ Assists, ⭐ Ratings for each player
+- 🏅 Special MOTM (Man of the Match) badge
+- 📱 1200x800px resolution, perfect for Discord
+
+**Preview**: Use `/testcard` to see a demo!
+**Documentation**: See [STAT_CARDS.md](docs/STAT_CARDS.md) for details
 
 ### 📊 Statistics Commands
 
@@ -46,16 +59,18 @@ A feature-rich Discord bot that tracks EA FC 26 Pro Clubs matches and displays c
 - **`/setclub <club_id> <generation>`** — Set the club to track (accepts club ID or EA URL)
 - **`/setmatchchannel <channel>`** — Configure automatic match result posting
 - **`/setmilestonechannel <channel>`** — Set channel for milestone announcements
+- **`/testcard`** — 🎨 Preview a demo stat card to see the design
 
 ### 🔄 Auto Match Posting
 
-Automatically polls for new matches every 60 seconds and posts detailed results with:
-- Final score and result (✅ Win / ❌ Loss / 🤝 Draw)
-- ⚽ Goal scorers with assists breakdown
-- ⭐ Man of the Match with rating
-- 📊 Top 3 rated players from the match
-- 📈 Team aggregate stats (pass accuracy, shots, tackles)
-- 🕐 Match timestamp and time ago
+Automatically polls for new matches every 60 seconds and posts **beautiful stat cards** with:
+- 🎨 **Stunning visual cards** with gradient backgrounds and modern design
+- 🎯 Final score and result (color-coded: 🟢 Win / 🔴 Loss / 🟡 Draw)
+- 👥 Top 3 performers with medals 🥇🥈🥉
+- ⚽ Goals, 🅰️ Assists, ⭐ Ratings for each player
+- 🏅 Man of the Match badge
+- 🕐 Match timestamp and platform
+- ✅ **Automatic fallback** to text embeds if card generation fails
 
 ### 🏆 Milestone Tracking
 

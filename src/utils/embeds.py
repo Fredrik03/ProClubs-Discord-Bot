@@ -2,7 +2,11 @@
 Discord embed builders for match results and stats.
 """
 import discord
+import logging
 from datetime import datetime, timezone
+from typing import Optional
+
+logger = logging.getLogger('ProClubsBot.Embeds')
 
 
 def utc_to_str(ts: int) -> str:
@@ -156,5 +160,129 @@ def build_match_embed(club_id: int, platform: str, match: dict, match_type: str,
     
     embed.set_footer(text=f"Platform: {platform} | Match Type: {match_type}")
     return embed
+
+
+def prepare_match_card_data(club_id: int, platform: str, match: dict, club_name_hint: Optional[str] = None) -> dict:
+    """
+    Prepare match data for stat card generation.
+    Extracts and formats all necessary data from the match dict.
+    
+    Args:
+        club_id: Your club ID
+        platform: Platform string
+        match: Match data from EA API
+        club_name_hint: Optional club name override
+    
+    Returns:
+        Dictionary with formatted data for create_match_card()
+    """
+    logger.debug(f"[Embeds] Preparing match card data for club {club_id}")
+    
+    # Get clubs data from API structure
+    clubs = match.get("clubs", {})
+    
+    # Find our club and opponent
+    our_club = clubs.get(str(club_id), {})
+    opponent_ids = [cid for cid in clubs.keys() if str(cid) != str(club_id)]
+    opponent_club = clubs.get(opponent_ids[0], {}) if opponent_ids else {}
+    
+    # Get club names
+    our_name = club_name_hint or our_club.get("details", {}).get("name", f"Club {club_id}")
+    opponent_name = opponent_club.get("details", {}).get("name", "Unknown Opponent")
+    
+    # Get scores
+    our_score = int(our_club.get("score", 0))
+    opp_score = int(opponent_club.get("score", 0))
+    
+    # Determine result
+    result_code = our_club.get("result", "")
+    if result_code == "1":
+        result = "win"
+    elif result_code == "2":
+        result = "loss"
+    elif result_code == "3":
+        result = "draw"
+    else:
+        result = "draw"  # Default
+    
+    # Time ago string
+    time_ago = match.get("timeAgo", {})
+    if time_ago:
+        time_str = f"{time_ago.get('number', '?')} {time_ago.get('unit', 'time units')} ago"
+    else:
+        # Fallback to timestamp
+        ts = match.get("timestamp", 0)
+        try:
+            dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+            time_str = dt.strftime("%Y-%m-%d %H:%M UTC")
+        except Exception:
+            time_str = "Recently"
+    
+    # Get player stats from top-level players structure
+    all_players = match.get("players", {})
+    club_players = all_players.get(str(club_id), {})
+    
+    # Collect and format player data
+    players_list = []
+    
+    if club_players:
+        for player_id, player_data in club_players.items():
+            if isinstance(player_data, dict):
+                name = player_data.get("playername", "Unknown")
+                goals = int(player_data.get("goals", 0) or 0)
+                assists = int(player_data.get("assists", 0) or 0)
+                rating = float(player_data.get("rating", 0) or 0)
+                mom = int(player_data.get("mom", 0) or 0)
+                
+                # Get position (try multiple fields)
+                position = (
+                    player_data.get("pos", "") or
+                    player_data.get("position", "") or
+                    player_data.get("posSorted", ["ST"])[0] if player_data.get("posSorted") else "ST"
+                )
+                
+                # Clean up position string (remove numbers, limit length)
+                if isinstance(position, str):
+                    position = position.split()[0][:3].upper()  # Take first 3 chars
+                
+                players_list.append({
+                    "name": name,
+                    "position": position,
+                    "goals": goals,
+                    "assists": assists,
+                    "rating": rating,
+                    "motm": bool(mom == 1)
+                })
+        
+        # Sort players by contribution: goals > assists > rating
+        players_list.sort(
+            key=lambda x: (x["goals"], x["assists"], x["rating"]),
+            reverse=True
+        )
+    
+    # If no players found, add a placeholder
+    if not players_list:
+        players_list = [{
+            "name": "No player data",
+            "position": "N/A",
+            "goals": 0,
+            "assists": 0,
+            "rating": 0.0,
+            "motm": False
+        }]
+    
+    logger.debug(f"[Embeds] Prepared data for {our_name} vs {opponent_name}: {our_score}-{opp_score} ({result})")
+    logger.debug(f"[Embeds] Found {len(players_list)} players")
+    
+    return {
+        "club_name": our_name,
+        "opponent_name": opponent_name,
+        "club_score": our_score,
+        "opponent_score": opp_score,
+        "result": result,
+        "players": players_list,
+        "match_time": time_str,
+        "platform": platform
+    }
 
 
