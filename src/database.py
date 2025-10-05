@@ -200,24 +200,37 @@ def get_all_guild_settings():
 
 def has_milestone_been_announced(guild_id: int, player_name: str, milestone_type: str, milestone_value: int) -> bool:
     """Check if a milestone has already been announced."""
-    with sqlite3.connect(DB_PATH) as db:
-        cur = db.execute(
-            "SELECT 1 FROM player_milestones WHERE guild_id=? AND player_name=? AND milestone_type=? AND milestone_value=?",
-            (guild_id, player_name, milestone_type, milestone_value),
-        )
-        return cur.fetchone() is not None
+    try:
+        with sqlite3.connect(DB_PATH) as db:
+            cur = db.execute(
+                "SELECT 1 FROM player_milestones WHERE guild_id=? AND player_name=? AND milestone_type=? AND milestone_value=?",
+                (guild_id, player_name, milestone_type, milestone_value),
+            )
+            exists = cur.fetchone() is not None
+            logger.debug(f"[Database] Milestone check: {player_name} {milestone_value} {milestone_type} = {'already announced' if exists else 'NEW'}")
+            return exists
+    except Exception as e:
+        logger.error(f"[Database] ❌ Failed to check milestone: {e}", exc_info=True)
+        raise
 
 
 def record_milestone(guild_id: int, player_name: str, milestone_type: str, milestone_value: int):
     """Record that a milestone has been announced."""
-    with sqlite3.connect(DB_PATH) as db:
-        db.execute(
-            """
-            INSERT OR IGNORE INTO player_milestones (guild_id, player_name, milestone_type, milestone_value, achieved_at)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (guild_id, player_name, milestone_type, milestone_value, datetime.utcnow().isoformat()),
-        )
+    logger.debug(f"[Database] Recording milestone: guild={guild_id}, player={player_name}, type={milestone_type}, value={milestone_value}")
+    try:
+        with sqlite3.connect(DB_PATH) as db:
+            db.execute(
+                """
+                INSERT OR IGNORE INTO player_milestones (guild_id, player_name, milestone_type, milestone_value, achieved_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (guild_id, player_name, milestone_type, milestone_value, datetime.utcnow().isoformat()),
+            )
+            db.commit()
+        logger.debug(f"[Database] ✅ Milestone recorded successfully")
+    except Exception as e:
+        logger.error(f"[Database] ❌ Failed to record milestone: {e}", exc_info=True)
+        raise
 
 
 def cache_club_members(guild_id: int, player_names: list[str]):

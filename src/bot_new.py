@@ -230,6 +230,32 @@ class ProClubsBot(discord.Client):
                     set_last_match_id(guild_id, str(match_id))
                     logger.info(f"✅ [Guild {guild_id}] Successfully posted match {match_id} and updated database")
                     
+                    # Step 8: Check for milestones
+                    logger.debug(f"[Guild {guild_id}] Checking for player milestones...")
+                    try:
+                        members_data = await fetch_json(
+                            session,
+                            "/members/stats",
+                            {"clubId": str(club_id), "platform": used_platform},
+                        )
+                        
+                        if isinstance(members_data, list):
+                            members_list = members_data
+                        else:
+                            members_list = members_data.get("members") if isinstance(members_data, dict) else []
+                        
+                        members = [m for m in members_list if isinstance(m, dict)]
+                        
+                        # Check milestones for all players
+                        for member in members:
+                            player_name = member.get("name", "Unknown")
+                            new_milestones = check_milestones(guild_id, player_name, member)
+                            if new_milestones:
+                                logger.info(f"[Guild {guild_id}] New milestones detected for {player_name}: {len(new_milestones)} milestone(s)")
+                                await announce_milestones(self, guild_id, player_name, new_milestones)
+                    except Exception as milestone_error:
+                        logger.error(f"[Guild {guild_id}] Error checking milestones: {milestone_error}", exc_info=True)
+                    
                 except Exception as e:  # noqa: BLE001
                     logger.error(f"❌ [Guild {guild_id}] Error polling guild: {e}", exc_info=True)
 
@@ -417,8 +443,11 @@ async def clubstats(interaction: discord.Interaction):
             losses = int(stats.get("losses", 0) or 0)
             ties = int(stats.get("ties", 0) or 0)
             total_matches = int(stats.get("gamesPlayed", 0) or 0)
+            
+            # Use CLUB overall stats for consistency (not player stats which exclude former members)
             goals_for = int(stats.get("goals", 0) or 0)
             goals_against = int(stats.get("goalsAgainst", 0) or 0)
+            
             skill_rating = int(stats.get("skillRating", 0) or 0)
             promotions = int(stats.get("promotions", 0) or 0)
             relegations = int(stats.get("relegations", 0) or 0)
@@ -451,10 +480,13 @@ async def clubstats(interaction: discord.Interaction):
                 cache_club_members(interaction.guild_id, player_names)
                 logger.debug(f"[Command: clubstats] Cached {len(player_names)} player names for autocomplete")
             
-            goals = sum(int(m.get("goals", 0) or 0) for m in members)
-            assists = sum(int(m.get("assists", 0) or 0) for m in members)
-            logger.debug(f"[Command: clubstats] Found {len(members)} members, total goals: {goals}, total assists: {assists}")
+            # Note: We use club overall stats for goals/assists, not player sum
+            # This ensures consistency with GA and includes former members
+            logger.debug(f"[Command: clubstats] Found {len(members)} members, club goals: {goals_for}, club GA: {goals_against}")
 
+            # Calculate assists from current players (EA doesn't provide club-wide assists)
+            assists = sum(int(m.get("assists", 0) or 0) for m in members)
+            
             embed = discord.Embed(
                 title=f"📊 {name}",
                 description=f"Skill Rating: **{skill_rating}** | Platform: {used_platform}",
@@ -464,7 +496,7 @@ async def clubstats(interaction: discord.Interaction):
             embed.add_field(name="Record", value=f"{wins}W - {losses}L - {ties}D", inline=True)
             embed.add_field(name="Matches", value=str(total_matches), inline=True)
             embed.add_field(name="Win %", value=f"{win_pct:.1f}%", inline=True)
-            embed.add_field(name="Goals", value=str(goals), inline=True)
+            embed.add_field(name="Goals", value=str(goals_for), inline=True)
             embed.add_field(name="Assists", value=str(assists), inline=True)
             embed.add_field(name="GA", value=str(goals_against), inline=True)
             embed.add_field(name="Promotions", value=f"↗️ {promotions}", inline=True)
