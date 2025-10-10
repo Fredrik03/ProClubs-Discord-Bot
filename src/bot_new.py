@@ -14,26 +14,38 @@ KEY COMPONENTS:
    - Compares match ID with last posted match
    - Posts new matches to configured Discord channel
    - Updates database with new match ID to prevent duplicates
+   - Checks for player milestones and achievements
 
 2. Database (database.py):
    - SQLite database storing guild settings (club_id, platform, channel_id, etc.)
    - Tracks last posted match ID per guild
    - Caches player names for autocomplete
    - Stores player milestone achievements
+   - Stores player achievement unlocks
+   - Tracks match history for streak-based achievements
 
-3. EA API Client (utils/ea_api.py):
+3. Milestones & Achievements:
+   - Milestones (milestones.py): Career stat thresholds (10 goals, 50 assists, etc.)
+   - Achievements (achievements.py): Special accomplishments (hat tricks, perfect 10s, etc.)
+   - Both auto-detected after matches and when using /clubstats
+
+4. EA API Client (utils/ea_api.py):
    - Handles all communication with EA's Pro Clubs API
    - Includes retry logic and error handling
    - Session warmup to bypass Cloudflare/WAF protection
    - Auto-fallback between gen5/gen4 platforms
 
-4. Slash Commands:
+5. Slash Commands:
    - /setclub: Configure which club to track
    - /setmatchchannel: Set where matches are posted
+   - /setmilestonechannel: Set where milestones are announced
+   - /setachievementchannel: Set where achievements are announced
    - /clubstats: View overall club statistics
    - /playerstats: View individual player stats
    - /lastmatches: View recent match history
    - /leaderboard: View player leaderboards
+   - /achievements: View a player's earned achievements
+   - /listachievements: List all available achievements
 
 LOGGING:
 --------
@@ -59,9 +71,11 @@ from datetime import datetime, timezone
 # Import our modules
 from database import (
     init_db, get_settings, upsert_settings, set_last_match_id,
-    get_all_guild_settings, cache_club_members, get_cached_club_members
+    get_all_guild_settings, cache_club_members, get_cached_club_members,
+    update_player_match_history
 )
 from milestones import check_milestones, announce_milestones
+from achievements import check_achievements, announce_achievements
 from utils.ea_api import (
     platform_from_choice, parse_club_id_from_any, warmup_session,
     fetch_club_info, fetch_latest_match, fetch_json, HTTP_TIMEOUT,
@@ -230,8 +244,8 @@ class ProClubsBot(discord.Client):
                     set_last_match_id(guild_id, str(match_id))
                     logger.info(f"✅ [Guild {guild_id}] Successfully posted match {match_id} and updated database")
                     
-                    # Step 8: Check for milestones
-                    logger.debug(f"[Guild {guild_id}] Checking for player milestones...")
+                    # Step 8: Check for milestones and achievements
+                    logger.debug(f"[Guild {guild_id}] Checking for player milestones and achievements...")
                     try:
                         members_data = await fetch_json(
                             session,
@@ -246,15 +260,46 @@ class ProClubsBot(discord.Client):
                         
                         members = [m for m in members_list if isinstance(m, dict)]
                         
-                        # Check milestones for all players
+                        # Get club data from match for team-based achievements
+                        clubs = match.get("clubs", {})
+                        our_club = clubs.get(str(club_id), {})
+                        opponent_id = [cid for cid in clubs.keys() if str(cid) != str(club_id)]
+                        opponent_club = clubs.get(opponent_id[0], {}) if opponent_id else {}
+                        our_score = int(our_club.get("score", 0) or 0)
+                        opp_score = int(opponent_club.get("score", 0) or 0)
+                        clean_sheet = (opp_score == 0)
+                        
+                        # Check milestones and achievements for all players
                         for member in members:
                             player_name = member.get("name", "Unknown")
+                            
+                            # Check milestones
                             new_milestones = check_milestones(guild_id, player_name, member)
                             if new_milestones:
                                 logger.info(f"[Guild {guild_id}] New milestones detected for {player_name}: {len(new_milestones)} milestone(s)")
                                 await announce_milestones(self, guild_id, player_name, new_milestones)
+                            
+                            # Check achievements (pass match data for match-specific achievements)
+                            new_achievements = check_achievements(guild_id, player_name, member, match_data=match)
+                            if new_achievements:
+                                logger.info(f"[Guild {guild_id}] New achievements detected for {player_name}: {len(new_achievements)} achievement(s)")
+                                await announce_achievements(self, guild_id, player_name, new_achievements)
+                            
+                            # Update match history for streak tracking
+                            # Find player's match stats
+                            players = match.get("players", {})
+                            club_players = players.get(str(club_id), {})
+                            for pid, pdata in club_players.items():
+                                if isinstance(pdata, dict) and pdata.get("playername", "").lower() == player_name.lower():
+                                    match_goals = int(pdata.get("goals", 0) or 0)
+                                    match_assists = int(pdata.get("assists", 0) or 0)
+                                    update_player_match_history(
+                                        guild_id, player_name, str(match_id),
+                                        match_goals, match_assists, clean_sheet
+                                    )
+                                    break
                     except Exception as milestone_error:
-                        logger.error(f"[Guild {guild_id}] Error checking milestones: {milestone_error}", exc_info=True)
+                        logger.error(f"[Guild {guild_id}] Error checking milestones/achievements: {milestone_error}", exc_info=True)
                     
                 except Exception as e:  # noqa: BLE001
                     logger.error(f"❌ [Guild {guild_id}] Error polling guild: {e}", exc_info=True)
@@ -383,6 +428,35 @@ async def setmilestonechannel(interaction: discord.Interaction, channel: discord
         f"🅰️ Assists: 1, 10, 25, 50, 100, 250, 500\n"
         f"🎮 Matches: 1, 10, 25, 50, 100, 250, 500\n"
         f"⭐ Man of the Match: 1, 5, 10, 25, 50, 100",
+        ephemeral=True
+    )
+
+
+@client.tree.command(name="setachievementchannel", description="Set the channel for achievement announcements.")
+@app_commands.describe(channel="Channel to receive achievement notifications")
+async def setachievementchannel(interaction: discord.Interaction, channel: discord.TextChannel):
+    """
+    Command: /setachievementchannel
+    Sets the Discord channel where player achievements will be posted.
+    Achievements are special accomplishments like hat tricks, perfect ratings, etc.
+    """
+    await interaction.response.defer(ephemeral=True)
+    logger.info(f"[Command: setachievementchannel] User {interaction.user} in guild {interaction.guild_id} setting achievement channel to #{channel.name} (ID: {channel.id})")
+    
+    # Check if club has been configured first
+    st = get_settings(interaction.guild_id)
+    if not st or not st.get("club_id"):
+        logger.warning(f"[Command: setachievementchannel] Guild {interaction.guild_id} tried to set achievement channel without setting club first")
+        await interaction.followup.send("Set a club first with `/setclub`.", ephemeral=True)
+        return
+
+    # Save achievement channel settings
+    logger.debug(f"[Command: setachievementchannel] Saving achievement channel to database: guild_id={interaction.guild_id}, achievement_channel_id={channel.id}")
+    upsert_settings(interaction.guild_id, achievement_channel_id=channel.id)
+    logger.info(f"✅ [Command: setachievementchannel] Guild {interaction.guild_id} set achievement channel to #{channel.name} (ID: {channel.id})")
+    await interaction.followup.send(
+        f"✅ Achievement notifications will be posted in {channel.mention}.\n\n"
+        f"Use `/listachievements` to see all available achievements!",
         ephemeral=True
     )
 
@@ -523,12 +597,19 @@ async def clubstats(interaction: discord.Interaction):
                     inline=False,
                 )
                 
-                # Check milestones for all players
+                # Check milestones and achievements for all players
                 for member in members:
                     player_name = member.get("name", "Unknown")
+                    
+                    # Check milestones
                     new_milestones = check_milestones(interaction.guild_id, player_name, member)
                     if new_milestones:
                         await announce_milestones(client, interaction.guild_id, player_name, new_milestones)
+                    
+                    # Check achievements (without match data, only stat-based achievements will be checked)
+                    new_achievements = check_achievements(interaction.guild_id, player_name, member)
+                    if new_achievements:
+                        await announce_achievements(client, interaction.guild_id, player_name, new_achievements)
 
         await interaction.followup.send(embed=embed)
     except Exception as e:  # noqa: BLE001
@@ -979,6 +1060,110 @@ async def leaderboard(interaction: discord.Interaction, category: app_commands.C
         logger.error(f"Error fetching leaderboard: {e}", exc_info=True)
         await interaction.followup.send(
             f"Could not fetch leaderboard right now. Error: {e}", ephemeral=True
+        )
+
+
+@client.tree.command(name="achievements", description="View a player's earned achievements")
+@app_commands.describe(player_name="The name of the player to look up")
+@app_commands.autocomplete(player_name=player_name_autocomplete)
+async def achievements_cmd(interaction: discord.Interaction, player_name: str):
+    """Display all achievements earned by a specific player."""
+    await interaction.response.defer(thinking=True)
+    logger.info(f"[Command: achievements] User {interaction.user} requesting achievements for {player_name}")
+    
+    st = get_settings(interaction.guild_id)
+    if not st or not st.get("club_id"):
+        await interaction.followup.send("Set a club first with `/setclub`.", ephemeral=True)
+        return
+    
+    try:
+        from database import get_player_achievement_history
+        from achievements import ACHIEVEMENTS
+        
+        # Get player's achievements from database
+        achievement_history = get_player_achievement_history(interaction.guild_id, player_name)
+        
+        if not achievement_history:
+            await interaction.followup.send(
+                f"🏆 **{player_name}** hasn't earned any achievements yet!\n\n"
+                f"Use `/listachievements` to see all available achievements.",
+                ephemeral=True
+            )
+            return
+        
+        # Build achievements embed
+        embed = discord.Embed(
+            title=f"🏆 {player_name}'s Achievements",
+            description=f"Total: **{len(achievement_history)}** achievement{'s' if len(achievement_history) != 1 else ''}",
+            color=discord.Color.gold(),
+        )
+        
+        # Group by category
+        categorized = {}
+        for ach in achievement_history:
+            ach_id = ach["achievement_id"]
+            if ach_id in ACHIEVEMENTS:
+                ach_data = ACHIEVEMENTS[ach_id]
+                category = ach_data["category"]
+                if category not in categorized:
+                    categorized[category] = []
+                categorized[category].append({
+                    **ach_data,
+                    "achieved_at": ach["achieved_at"]
+                })
+        
+        # Add fields for each category
+        for category, achievements_list in categorized.items():
+            ach_text = "\n".join([
+                f"{ach['emoji']} **{ach['name']}** - {ach['description']}"
+                for ach in achievements_list
+            ])
+            embed.add_field(name=category, value=ach_text, inline=False)
+        
+        embed.set_footer(text=f"Keep playing to unlock more achievements!")
+        await interaction.followup.send(embed=embed)
+        
+    except Exception as e:
+        logger.error(f"Error fetching achievements: {e}", exc_info=True)
+        await interaction.followup.send(
+            f"Could not fetch achievements right now. Error: {e}", ephemeral=True
+        )
+
+
+@client.tree.command(name="listachievements", description="List all available achievements")
+async def listachievements(interaction: discord.Interaction):
+    """Display all available achievements that can be earned."""
+    await interaction.response.defer(thinking=True)
+    logger.info(f"[Command: listachievements] User {interaction.user} requesting achievement list")
+    
+    try:
+        from achievements import get_all_achievements_list
+        
+        categorized = get_all_achievements_list()
+        
+        embed = discord.Embed(
+            title="🏆 All Available Achievements",
+            description=f"Earn these special achievements through exceptional performance!",
+            color=discord.Color.gold(),
+        )
+        
+        # Add fields for each category
+        for category, achievements_list in categorized.items():
+            ach_text = "\n".join([
+                f"{ach['emoji']} **{ach['name']}** - {ach['description']}"
+                for ach in achievements_list
+            ])
+            embed.add_field(name=category, value=ach_text, inline=False)
+        
+        total_count = sum(len(achievements_list) for achievements_list in categorized.values())
+        embed.set_footer(text=f"Total: {total_count} achievements available")
+        
+        await interaction.followup.send(embed=embed)
+        
+    except Exception as e:
+        logger.error(f"Error listing achievements: {e}", exc_info=True)
+        await interaction.followup.send(
+            f"Could not list achievements right now. Error: {e}", ephemeral=True
         )
 
 
