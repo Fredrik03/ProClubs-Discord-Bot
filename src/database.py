@@ -99,6 +99,14 @@ def init_db():
                     PRIMARY KEY (guild_id, player_name, match_id)
                 )
             """)
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS player_initialization (
+                    guild_id    INTEGER,
+                    player_name TEXT,
+                    initialized_at TEXT NOT NULL,
+                    PRIMARY KEY (guild_id, player_name)
+                )
+            """)
             
             # Migration: Add milestone_channel_id column if it doesn't exist
             cursor = db.execute("PRAGMA table_info(settings)")
@@ -396,6 +404,43 @@ def update_player_match_history(guild_id: int, player_name: str, match_id: str, 
         logger.debug(f"[Database] ✅ Match history updated successfully")
     except Exception as e:
         logger.error(f"[Database] ❌ Failed to update match history: {e}", exc_info=True)
+        raise
+
+
+# ---------- Player Initialization Functions ----------
+
+def is_player_initialized(guild_id: int, player_name: str) -> bool:
+    """Check if a player has been initialized (historical achievements backfilled)."""
+    try:
+        with sqlite3.connect(DB_PATH) as db:
+            cur = db.execute(
+                "SELECT 1 FROM player_initialization WHERE guild_id=? AND player_name=?",
+                (guild_id, player_name),
+            )
+            exists = cur.fetchone() is not None
+            logger.debug(f"[Database] Player initialization check: {player_name} = {'initialized' if exists else 'NEW'}")
+            return exists
+    except Exception as e:
+        logger.error(f"[Database] ❌ Failed to check player initialization: {e}", exc_info=True)
+        raise
+
+
+def mark_player_initialized(guild_id: int, player_name: str):
+    """Mark a player as initialized after historical achievements have been backfilled."""
+    logger.debug(f"[Database] Marking player as initialized: guild={guild_id}, player={player_name}")
+    try:
+        with sqlite3.connect(DB_PATH) as db:
+            db.execute(
+                """
+                INSERT OR IGNORE INTO player_initialization (guild_id, player_name, initialized_at)
+                VALUES (?, ?, ?)
+                """,
+                (guild_id, player_name, datetime.utcnow().isoformat()),
+            )
+            db.commit()
+        logger.debug(f"[Database] ✅ Player marked as initialized")
+    except Exception as e:
+        logger.error(f"[Database] ❌ Failed to mark player as initialized: {e}", exc_info=True)
         raise
 
 

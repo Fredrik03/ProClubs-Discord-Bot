@@ -380,3 +380,152 @@ def get_all_achievements_list() -> list[dict]:
     
     return categorized
 
+
+def check_historical_achievements(guild_id: int, player_name: str, stats: dict) -> list[dict]:
+    """
+    Check for stat-based achievements only (for historical backfill).
+    This is used when a player is first seen to award historical achievements.
+    
+    Only checks achievements that can be determined from career stats:
+    - Man of the Match (first one)
+    - Sharpshooter (70%+ shot accuracy)
+    - Playmaker (more assists than goals)
+    - Goal Machine (2+ goals per game)
+    - Midfield Maestro (90%+ pass accuracy)
+    - The Wall (80%+ tackle success)
+    
+    Skips match-specific achievements (hat tricks, perfect 10s, etc.) and
+    streak achievements (on fire, clean sheets, etc.) since we don't have
+    historical match data.
+    
+    Args:
+        guild_id: Discord guild ID
+        player_name: Player name
+        stats: Overall player stats from EA API
+    
+    Returns:
+        List of achievement dicts with keys: id, name, emoji, description
+    """
+    achievements = []
+    
+    # Extract stats
+    matches_played = int(stats.get("gamesPlayed", 0) or 0)
+    goals = int(stats.get("goals", 0) or 0)
+    assists = int(stats.get("assists", 0) or 0)
+    motm = int(stats.get("manOfTheMatch", 0) or 0)
+    shot_accuracy = int(stats.get("shotSuccessRate", 0) or 0)
+    pass_accuracy = int(stats.get("passSuccessRate", 0) or 0)
+    tackle_success = int(stats.get("tackleSuccessRate", 0) or 0)
+    tackles_made = int(stats.get("tacklesMade", 0) or 0)
+    
+    # Man of the Match (first one)
+    if motm >= 1 and not has_achievement_been_earned(guild_id, player_name, "man_of_match"):
+        achievements.append({
+            "id": "man_of_match",
+            **ACHIEVEMENTS["man_of_match"]
+        })
+        # Record it silently (no announcement, that's done in the summary)
+        record_achievement(guild_id, player_name, "man_of_match")
+    
+    # Statistical Excellence Achievements
+    if matches_played >= 50 and shot_accuracy >= 70:
+        if not has_achievement_been_earned(guild_id, player_name, "sharpshooter"):
+            achievements.append({
+                "id": "sharpshooter",
+                **ACHIEVEMENTS["sharpshooter"]
+            })
+            record_achievement(guild_id, player_name, "sharpshooter")
+    
+    if assists >= 50 and goals >= 50 and assists > goals:
+        if not has_achievement_been_earned(guild_id, player_name, "playmaker"):
+            achievements.append({
+                "id": "playmaker",
+                **ACHIEVEMENTS["playmaker"]
+            })
+            record_achievement(guild_id, player_name, "playmaker")
+    
+    goals_per_game = goals / matches_played if matches_played > 0 else 0
+    if matches_played >= 25 and goals_per_game >= 2.0:
+        if not has_achievement_been_earned(guild_id, player_name, "goal_machine"):
+            achievements.append({
+                "id": "goal_machine",
+                **ACHIEVEMENTS["goal_machine"]
+            })
+            record_achievement(guild_id, player_name, "goal_machine")
+    
+    if matches_played >= 100 and pass_accuracy >= 90:
+        if not has_achievement_been_earned(guild_id, player_name, "midfield_maestro"):
+            achievements.append({
+                "id": "midfield_maestro",
+                **ACHIEVEMENTS["midfield_maestro"]
+            })
+            record_achievement(guild_id, player_name, "midfield_maestro")
+    
+    if tackles_made >= 500 and tackle_success >= 80:
+        if not has_achievement_been_earned(guild_id, player_name, "the_wall"):
+            achievements.append({
+                "id": "the_wall",
+                **ACHIEVEMENTS["the_wall"]
+            })
+            record_achievement(guild_id, player_name, "the_wall")
+    
+    return achievements
+
+
+async def announce_historical_achievements(client, guild_id: int, player_name: str, achievements_list: list[dict]):
+    """
+    Post a summary announcement for historical achievements (earned before bot joined).
+    This is different from regular achievement announcements - it's a single embed
+    with all historical achievements listed.
+    
+    Args:
+        client: Discord client
+        guild_id: Discord guild ID
+        player_name: Player name
+        achievements_list: List of historical achievements
+    """
+    if not achievements_list:
+        return
+    
+    settings = get_settings(guild_id)
+    if not settings or not settings.get("achievement_channel_id"):
+        logger.debug(f"No achievement channel configured for guild {guild_id}")
+        return
+    
+    try:
+        channel = client.get_channel(settings["achievement_channel_id"])
+        if not channel:
+            logger.warning(f"Achievement channel {settings['achievement_channel_id']} not found")
+            return
+        
+        # Create summary embed (blue color to differentiate from new achievements)
+        embed = discord.Embed(
+            title=f"🏆 {player_name}'s Historical Achievements",
+            description="Achievements earned before the bot joined:",
+            color=discord.Color.blue(),
+            timestamp=datetime.now(timezone.utc)
+        )
+        
+        # Group by category for better organization
+        categorized = {}
+        for achievement in achievements_list:
+            category = achievement['category']
+            if category not in categorized:
+                categorized[category] = []
+            categorized[category].append(achievement)
+        
+        # Add fields for each category
+        for category, achs in categorized.items():
+            ach_text = "\n".join([
+                f"{ach['emoji']} **{ach['name']}** - {ach['description']}"
+                for ach in achs
+            ])
+            embed.add_field(name=category, value=ach_text, inline=False)
+        
+        embed.set_footer(text="Match-specific achievements (hat tricks, perfect ratings, streaks, etc.) will be tracked from now on!")
+        
+        await channel.send(embed=embed)
+        logger.info(f"Announced {len(achievements_list)} historical achievement(s) for {player_name}")
+    
+    except Exception as e:
+        logger.error(f"Failed to announce historical achievements: {e}", exc_info=True)

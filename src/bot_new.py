@@ -72,10 +72,13 @@ from datetime import datetime, timezone
 from database import (
     init_db, get_settings, upsert_settings, set_last_match_id,
     get_all_guild_settings, cache_club_members, get_cached_club_members,
-    update_player_match_history
+    update_player_match_history, is_player_initialized, mark_player_initialized
 )
 from milestones import check_milestones, announce_milestones
-from achievements import check_achievements, announce_achievements
+from achievements import (
+    check_achievements, announce_achievements,
+    check_historical_achievements, announce_historical_achievements
+)
 from utils.ea_api import (
     platform_from_choice, parse_club_id_from_any, warmup_session,
     fetch_club_info, fetch_latest_match, fetch_json, HTTP_TIMEOUT,
@@ -272,6 +275,15 @@ class ProClubsBot(discord.Client):
                         # Check milestones and achievements for all players
                         for member in members:
                             player_name = member.get("name", "Unknown")
+                            
+                            # Check if player needs initialization (first time seeing them)
+                            if not is_player_initialized(guild_id, player_name):
+                                logger.info(f"[Guild {guild_id}] New player detected: {player_name} - checking historical achievements")
+                                historical_achievements = check_historical_achievements(guild_id, player_name, member)
+                                if historical_achievements:
+                                    logger.info(f"[Guild {guild_id}] Found {len(historical_achievements)} historical achievement(s) for {player_name}")
+                                    await announce_historical_achievements(self, guild_id, player_name, historical_achievements)
+                                mark_player_initialized(guild_id, player_name)
                             
                             # Check milestones
                             new_milestones = check_milestones(guild_id, player_name, member)
@@ -600,6 +612,15 @@ async def clubstats(interaction: discord.Interaction):
                 # Check milestones and achievements for all players
                 for member in members:
                     player_name = member.get("name", "Unknown")
+                    
+                    # Check if player needs initialization (first time seeing them)
+                    if not is_player_initialized(interaction.guild_id, player_name):
+                        logger.info(f"New player detected in /clubstats: {player_name} - checking historical achievements")
+                        historical_achievements = check_historical_achievements(interaction.guild_id, player_name, member)
+                        if historical_achievements:
+                            logger.info(f"Found {len(historical_achievements)} historical achievement(s) for {player_name}")
+                            await announce_historical_achievements(client, interaction.guild_id, player_name, historical_achievements)
+                        mark_player_initialized(interaction.guild_id, player_name)
                     
                     # Check milestones
                     new_milestones = check_milestones(interaction.guild_id, player_name, member)
