@@ -78,12 +78,45 @@ def init_db():
                     PRIMARY KEY (guild_id, player_name)
                 )
             """)
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS player_achievements (
+                    guild_id    INTEGER,
+                    player_name TEXT,
+                    achievement_id TEXT,        -- e.g. 'hat_trick_hero', 'perfect_10'
+                    achieved_at TEXT NOT NULL,
+                    PRIMARY KEY (guild_id, player_name, achievement_id)
+                )
+            """)
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS player_match_history (
+                    guild_id    INTEGER,
+                    player_name TEXT,
+                    match_id    TEXT,
+                    goals       INTEGER DEFAULT 0,
+                    assists     INTEGER DEFAULT 0,
+                    clean_sheet INTEGER DEFAULT 0,  -- 1 if clean sheet, 0 otherwise
+                    played_at   TEXT NOT NULL,
+                    PRIMARY KEY (guild_id, player_name, match_id)
+                )
+            """)
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS player_initialization (
+                    guild_id    INTEGER,
+                    player_name TEXT,
+                    initialized_at TEXT NOT NULL,
+                    PRIMARY KEY (guild_id, player_name)
+                )
+            """)
             
             # Migration: Add milestone_channel_id column if it doesn't exist
             cursor = db.execute("PRAGMA table_info(settings)")
             columns = [row[1] for row in cursor.fetchall()]
             if "milestone_channel_id" not in columns:
                 db.execute("ALTER TABLE settings ADD COLUMN milestone_channel_id INTEGER")
+            
+            # Migration: Add achievement_channel_id column if it doesn't exist
+            if "achievement_channel_id" not in columns:
+                db.execute("ALTER TABLE settings ADD COLUMN achievement_channel_id INTEGER")
         return True
     except Exception as e:
         raise RuntimeError(f"Failed to initialize database: {e}") from e
@@ -137,14 +170,14 @@ def get_settings(guild_id: int):
     try:
         with sqlite3.connect(DB_PATH) as db:
             cur = db.execute(
-                "SELECT guild_id, club_id, platform, channel_id, last_match_id, autopost, milestone_channel_id FROM settings WHERE guild_id=?",
+                "SELECT guild_id, club_id, platform, channel_id, last_match_id, autopost, milestone_channel_id, achievement_channel_id FROM settings WHERE guild_id=?",
                 (guild_id,),
             )
             row = cur.fetchone()
             if not row:
                 logger.debug(f"[Database] No settings found for guild {guild_id}")
                 return None
-            keys = ["guild_id", "club_id", "platform", "channel_id", "last_match_id", "autopost", "milestone_channel_id"]
+            keys = ["guild_id", "club_id", "platform", "channel_id", "last_match_id", "autopost", "milestone_channel_id", "achievement_channel_id"]
             result = dict(zip(keys, row))
             logger.debug(f"[Database] Retrieved settings for guild {guild_id}: club_id={result.get('club_id')}, platform={result.get('platform')}, autopost={result.get('autopost')}")
             return result
@@ -269,5 +302,145 @@ def get_cached_club_members(guild_id: int) -> list[str]:
             (guild_id,),
         )
         return [row[0] for row in cur.fetchall()]
+
+
+# ---------- Achievement Functions ----------
+
+def has_achievement_been_earned(guild_id: int, player_name: str, achievement_id: str) -> bool:
+    """Check if a player has already earned an achievement."""
+    try:
+        with sqlite3.connect(DB_PATH) as db:
+            cur = db.execute(
+                "SELECT 1 FROM player_achievements WHERE guild_id=? AND player_name=? AND achievement_id=?",
+                (guild_id, player_name, achievement_id),
+            )
+            exists = cur.fetchone() is not None
+            logger.debug(f"[Database] Achievement check: {player_name} - {achievement_id} = {'already earned' if exists else 'NEW'}")
+            return exists
+    except Exception as e:
+        logger.error(f"[Database] ❌ Failed to check achievement: {e}", exc_info=True)
+        raise
+
+
+def record_achievement(guild_id: int, player_name: str, achievement_id: str):
+    """Record that a player has earned an achievement."""
+    logger.debug(f"[Database] Recording achievement: guild={guild_id}, player={player_name}, achievement={achievement_id}")
+    try:
+        with sqlite3.connect(DB_PATH) as db:
+            db.execute(
+                """
+                INSERT OR IGNORE INTO player_achievements (guild_id, player_name, achievement_id, achieved_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (guild_id, player_name, achievement_id, datetime.utcnow().isoformat()),
+            )
+            db.commit()
+        logger.debug(f"[Database] ✅ Achievement recorded successfully")
+    except Exception as e:
+        logger.error(f"[Database] ❌ Failed to record achievement: {e}", exc_info=True)
+        raise
+
+
+def get_player_achievement_history(guild_id: int, player_name: str) -> list[dict]:
+    """Get all achievements earned by a player."""
+    try:
+        with sqlite3.connect(DB_PATH) as db:
+            cur = db.execute(
+                "SELECT achievement_id, achieved_at FROM player_achievements WHERE guild_id=? AND player_name=? ORDER BY achieved_at",
+                (guild_id, player_name),
+            )
+            rows = cur.fetchall()
+            return [{"achievement_id": row[0], "achieved_at": row[1]} for row in rows]
+    except Exception as e:
+        logger.error(f"[Database] ❌ Failed to get player achievements: {e}", exc_info=True)
+        raise
+
+
+def get_player_match_history(guild_id: int, player_name: str, limit: int = 20) -> list[dict]:
+    """Get recent match history for a player (for streak tracking)."""
+    try:
+        with sqlite3.connect(DB_PATH) as db:
+            cur = db.execute(
+                """
+                SELECT match_id, goals, assists, clean_sheet, played_at 
+                FROM player_match_history 
+                WHERE guild_id=? AND player_name=? 
+                ORDER BY played_at DESC 
+                LIMIT ?
+                """,
+                (guild_id, player_name, limit),
+            )
+            rows = cur.fetchall()
+            # Return in chronological order (oldest first)
+            return [
+                {
+                    "match_id": row[0],
+                    "goals": row[1],
+                    "assists": row[2],
+                    "clean_sheet": bool(row[3]),
+                    "played_at": row[4]
+                }
+                for row in reversed(rows)
+            ]
+    except Exception as e:
+        logger.error(f"[Database] ❌ Failed to get player match history: {e}", exc_info=True)
+        return []
+
+
+def update_player_match_history(guild_id: int, player_name: str, match_id: str, goals: int, assists: int, clean_sheet: bool):
+    """Add or update a player's match in their history."""
+    logger.debug(f"[Database] Updating match history: player={player_name}, match={match_id}, goals={goals}, assists={assists}")
+    try:
+        with sqlite3.connect(DB_PATH) as db:
+            db.execute(
+                """
+                INSERT OR REPLACE INTO player_match_history 
+                (guild_id, player_name, match_id, goals, assists, clean_sheet, played_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (guild_id, player_name, match_id, goals, assists, 1 if clean_sheet else 0, datetime.utcnow().isoformat()),
+            )
+            db.commit()
+        logger.debug(f"[Database] ✅ Match history updated successfully")
+    except Exception as e:
+        logger.error(f"[Database] ❌ Failed to update match history: {e}", exc_info=True)
+        raise
+
+
+# ---------- Player Initialization Functions ----------
+
+def is_player_initialized(guild_id: int, player_name: str) -> bool:
+    """Check if a player has been initialized (historical achievements backfilled)."""
+    try:
+        with sqlite3.connect(DB_PATH) as db:
+            cur = db.execute(
+                "SELECT 1 FROM player_initialization WHERE guild_id=? AND player_name=?",
+                (guild_id, player_name),
+            )
+            exists = cur.fetchone() is not None
+            logger.debug(f"[Database] Player initialization check: {player_name} = {'initialized' if exists else 'NEW'}")
+            return exists
+    except Exception as e:
+        logger.error(f"[Database] ❌ Failed to check player initialization: {e}", exc_info=True)
+        raise
+
+
+def mark_player_initialized(guild_id: int, player_name: str):
+    """Mark a player as initialized after historical achievements have been backfilled."""
+    logger.debug(f"[Database] Marking player as initialized: guild={guild_id}, player={player_name}")
+    try:
+        with sqlite3.connect(DB_PATH) as db:
+            db.execute(
+                """
+                INSERT OR IGNORE INTO player_initialization (guild_id, player_name, initialized_at)
+                VALUES (?, ?, ?)
+                """,
+                (guild_id, player_name, datetime.utcnow().isoformat()),
+            )
+            db.commit()
+        logger.debug(f"[Database] ✅ Player marked as initialized")
+    except Exception as e:
+        logger.error(f"[Database] ❌ Failed to mark player as initialized: {e}", exc_info=True)
+        raise
 
 
