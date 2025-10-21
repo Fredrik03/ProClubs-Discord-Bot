@@ -345,6 +345,9 @@ async def announce_achievements(client, guild_id: int, player_name: str, achieve
             return
         
         for achievement in achievements_list:
+            # Record achievement FIRST to prevent duplicates
+            record_achievement(guild_id, player_name, achievement["id"])
+            
             # Create celebratory embed
             embed = discord.Embed(
                 title=f"🏆 Achievement Unlocked! 🏆",
@@ -358,8 +361,6 @@ async def announce_achievements(client, guild_id: int, player_name: str, achieve
             
             await channel.send(embed=embed)
             
-            # Record that we announced this achievement
-            record_achievement(guild_id, player_name, achievement["id"])
             logger.info(f"Announced achievement: {player_name} - {achievement['name']}")
     
     except Exception as e:
