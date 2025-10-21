@@ -95,6 +95,9 @@ def init_db():
                     goals       INTEGER DEFAULT 0,
                     assists     INTEGER DEFAULT 0,
                     clean_sheet INTEGER DEFAULT 0,  -- 1 if clean sheet, 0 otherwise
+                    hat_trick   INTEGER DEFAULT 0,  -- 1 if 3+ goals in match, 0 otherwise
+                    assist_hat_trick INTEGER DEFAULT 0,  -- 1 if 3+ assists in match, 0 otherwise
+                    position    TEXT,               -- position played in that match (e.g. ST, CAM, ANY)
                     played_at   TEXT NOT NULL,
                     PRIMARY KEY (guild_id, player_name, match_id)
                 )
@@ -117,6 +120,16 @@ def init_db():
             # Migration: Add achievement_channel_id column if it doesn't exist
             if "achievement_channel_id" not in columns:
                 db.execute("ALTER TABLE settings ADD COLUMN achievement_channel_id INTEGER")
+            
+            # Migration: Add hat-trick columns to player_match_history if they don't exist
+            cursor = db.execute("PRAGMA table_info(player_match_history)")
+            match_history_columns = [row[1] for row in cursor.fetchall()]
+            if "hat_trick" not in match_history_columns:
+                db.execute("ALTER TABLE player_match_history ADD COLUMN hat_trick INTEGER DEFAULT 0")
+            if "assist_hat_trick" not in match_history_columns:
+                db.execute("ALTER TABLE player_match_history ADD COLUMN assist_hat_trick INTEGER DEFAULT 0")
+            if "position" not in match_history_columns:
+                db.execute("ALTER TABLE player_match_history ADD COLUMN position TEXT")
         return True
     except Exception as e:
         raise RuntimeError(f"Failed to initialize database: {e}") from e
@@ -387,18 +400,22 @@ def get_player_match_history(guild_id: int, player_name: str, limit: int = 20) -
         return []
 
 
-def update_player_match_history(guild_id: int, player_name: str, match_id: str, goals: int, assists: int, clean_sheet: bool):
+def update_player_match_history(guild_id: int, player_name: str, match_id: str, goals: int, assists: int, clean_sheet: bool, position: str = None):
     """Add or update a player's match in their history."""
-    logger.debug(f"[Database] Updating match history: player={player_name}, match={match_id}, goals={goals}, assists={assists}")
+    # Calculate hat-trick flags
+    hat_trick = 1 if goals >= 3 else 0
+    assist_hat_trick = 1 if assists >= 3 else 0
+    
+    logger.debug(f"[Database] Updating match history: player={player_name}, match={match_id}, goals={goals}, assists={assists}, position={position}, hat_trick={hat_trick}, assist_hat_trick={assist_hat_trick}")
     try:
         with sqlite3.connect(DB_PATH) as db:
             db.execute(
                 """
                 INSERT OR REPLACE INTO player_match_history 
-                (guild_id, player_name, match_id, goals, assists, clean_sheet, played_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                (guild_id, player_name, match_id, goals, assists, clean_sheet, hat_trick, assist_hat_trick, position, played_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (guild_id, player_name, match_id, goals, assists, 1 if clean_sheet else 0, datetime.utcnow().isoformat()),
+                (guild_id, player_name, match_id, goals, assists, 1 if clean_sheet else 0, hat_trick, assist_hat_trick, position, datetime.utcnow().isoformat()),
             )
             db.commit()
         logger.debug(f"[Database] ✅ Match history updated successfully")
@@ -442,5 +459,70 @@ def mark_player_initialized(guild_id: int, player_name: str):
     except Exception as e:
         logger.error(f"[Database] ❌ Failed to mark player as initialized: {e}", exc_info=True)
         raise
+
+
+# ---------- Hat-trick Stats Functions ----------
+
+def get_player_hat_trick_count(guild_id: int, player_name: str) -> int:
+    """Get total number of hat-tricks (3+ goals in a match) for a player."""
+    try:
+        with sqlite3.connect(DB_PATH) as db:
+            cur = db.execute(
+                "SELECT COUNT(*) FROM player_match_history WHERE guild_id=? AND player_name=? AND hat_trick=1",
+                (guild_id, player_name),
+            )
+            count = cur.fetchone()[0]
+            return count
+    except Exception as e:
+        logger.error(f"[Database] ❌ Failed to get hat-trick count: {e}", exc_info=True)
+        return 0
+
+
+def get_player_assist_hat_trick_count(guild_id: int, player_name: str) -> int:
+    """Get total number of assist hat-tricks (3+ assists in a match) for a player."""
+    try:
+        with sqlite3.connect(DB_PATH) as db:
+            cur = db.execute(
+                "SELECT COUNT(*) FROM player_match_history WHERE guild_id=? AND player_name=? AND assist_hat_trick=1",
+                (guild_id, player_name),
+            )
+            count = cur.fetchone()[0]
+            return count
+    except Exception as e:
+        logger.error(f"[Database] ❌ Failed to get assist hat-trick count: {e}", exc_info=True)
+        return 0
+
+
+def get_all_players_hat_trick_stats(guild_id: int) -> list[dict]:
+    """
+    Get hat-trick stats for all players in a guild (for leaderboards).
+    Returns list of dicts with player_name, hat_tricks, and assist_hat_tricks.
+    """
+    try:
+        with sqlite3.connect(DB_PATH) as db:
+            cur = db.execute(
+                """
+                SELECT 
+                    player_name,
+                    SUM(hat_trick) as hat_tricks,
+                    SUM(assist_hat_trick) as assist_hat_tricks
+                FROM player_match_history 
+                WHERE guild_id=? 
+                GROUP BY player_name
+                """,
+                (guild_id,),
+            )
+            rows = cur.fetchall()
+            return [
+                {
+                    "player_name": row[0],
+                    "hat_tricks": row[1] or 0,
+                    "assist_hat_tricks": row[2] or 0
+                }
+                for row in rows
+            ]
+    except Exception as e:
+        logger.error(f"[Database] ❌ Failed to get hat-trick stats: {e}", exc_info=True)
+        return []
 
 
