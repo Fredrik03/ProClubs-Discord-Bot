@@ -215,7 +215,14 @@ class ProClubsBot(discord.Client):
                     
                     # Last resort: create composite ID from timestamp and score
                     if not match_id:
-                        match_id = f"{match.get('timestamp', 0)}:{match.get('homeScore', '?')}-{match.get('awayScore', '?')}"
+                        # Get scores from clubs structure (correct field names)
+                        clubs = match.get("clubs", {})
+                        our_club = clubs.get(str(club_id), {})
+                        opponent_ids = [cid for cid in clubs.keys() if str(cid) != str(club_id)]
+                        opponent_club = clubs.get(opponent_ids[0], {}) if opponent_ids else {}
+                        our_score = our_club.get("score", "?")
+                        opp_score = opponent_club.get("score", "?")
+                        match_id = f"{match.get('timestamp', 0)}:{our_score}-{opp_score}"
                         logger.debug(f"[Guild {guild_id}] Using fallback match ID: {match_id}")
                     
                     logger.info(f"[Guild {guild_id}] Latest match ID: {match_id}")
@@ -628,7 +635,8 @@ async def clubstats(interaction: discord.Interaction):
                     inline=False,
                 )
                 
-                # Check milestones and achievements for all players
+                # Check for new players and initialize them (but don't announce milestones/achievements here)
+                # Milestones and achievements are already handled automatically when new matches are detected
                 for member in members:
                     player_name = member.get("name", "Unknown")
                     
@@ -641,15 +649,8 @@ async def clubstats(interaction: discord.Interaction):
                             await announce_historical_achievements(client, interaction.guild_id, player_name, historical_achievements)
                         mark_player_initialized(interaction.guild_id, player_name)
                     
-                    # Check milestones
-                    new_milestones = check_milestones(interaction.guild_id, player_name, member)
-                    if new_milestones:
-                        await announce_milestones(client, interaction.guild_id, player_name, new_milestones)
-                    
-                    # Check achievements (without match data, only stat-based achievements will be checked)
-                    new_achievements = check_achievements(interaction.guild_id, player_name, member)
-                    if new_achievements:
-                        await announce_achievements(client, interaction.guild_id, player_name, new_achievements)
+                    # Note: Milestones and achievements are checked automatically when new matches are detected
+                    # We don't check them here to avoid duplicate announcements
 
         await interaction.followup.send(embed=embed)
     except Exception as e:  # noqa: BLE001

@@ -66,6 +66,9 @@ async def announce_milestones(client, guild_id: int, player_name: str, milestone
             return
         
         for milestone in milestones:
+            # Record milestone FIRST to prevent duplicates
+            record_milestone(guild_id, player_name, milestone["type"], milestone["value"])
+            
             # Create celebratory embed
             embed = discord.Embed(
                 title=f"🎉 Milestone Achieved! 🎉",
@@ -77,8 +80,6 @@ async def announce_milestones(client, guild_id: int, player_name: str, milestone
             
             await channel.send(embed=embed)
             
-            # Record that we announced this milestone
-            record_milestone(guild_id, player_name, milestone["type"], milestone["value"])
             logger.info(f"Announced milestone: {player_name} - {milestone['value']} {milestone['type']}")
     
     except Exception as e:
