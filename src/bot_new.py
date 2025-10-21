@@ -72,7 +72,9 @@ from datetime import datetime, timezone
 from database import (
     init_db, get_settings, upsert_settings, set_last_match_id,
     get_all_guild_settings, cache_club_members, get_cached_club_members,
-    update_player_match_history, is_player_initialized, mark_player_initialized
+    update_player_match_history, is_player_initialized, mark_player_initialized,
+    get_player_hat_trick_count, get_player_assist_hat_trick_count,
+    get_all_players_hat_trick_stats
 )
 from milestones import check_milestones, announce_milestones
 from achievements import (
@@ -305,9 +307,26 @@ class ProClubsBot(discord.Client):
                                 if isinstance(pdata, dict) and pdata.get("playername", "").lower() == player_name.lower():
                                     match_goals = int(pdata.get("goals", 0) or 0)
                                     match_assists = int(pdata.get("assists", 0) or 0)
+                                    
+                                    # Extract position played in this match
+                                    # Check various possible field names for position
+                                    position = (pdata.get("pos") or pdata.get("position") or 
+                                               pdata.get("posSorted") or pdata.get("positionSorted") or
+                                               member.get("favoritePosition") or "Unknown")
+                                    
+                                    # Debug logging for ANY position investigation
+                                    # This helps us understand if EA API separates AI stats from Pro stats
+                                    if str(position).upper() == "ANY" or str(position) == "28":
+                                        logger.info(f"[ANY Position Debug] Player: {player_name}, Position: {position}, Goals: {match_goals}, Assists: {match_assists}")
+                                        logger.debug(f"[ANY Position Debug] Full player data: {pdata}")
+                                        # Check for fields that might indicate AI vs Pro
+                                        vproattr = pdata.get("vproattr")
+                                        if vproattr:
+                                            logger.debug(f"[ANY Position Debug] vproattr present: {vproattr}")
+                                    
                                     update_player_match_history(
                                         guild_id, player_name, str(match_id),
-                                        match_goals, match_assists, clean_sheet
+                                        match_goals, match_assists, clean_sheet, position
                                     )
                                     break
                     except Exception as milestone_error:
@@ -779,6 +798,10 @@ async def playerstats(interaction: discord.Interaction, player_name: str):
             
             goals_per_game = goals / matches_played if matches_played else 0
             assists_per_game = assists / matches_played if matches_played else 0
+            
+            # Get hat-trick stats from match history
+            hat_tricks = get_player_hat_trick_count(interaction.guild_id, name)
+            assist_hat_tricks = get_player_assist_hat_trick_count(interaction.guild_id, name)
 
             embed = discord.Embed(
                 title=f"⚽ {name}",
@@ -794,6 +817,12 @@ async def playerstats(interaction: discord.Interaction, player_name: str):
             embed.add_field(name="⚽ Goals", value=str(goals), inline=True)
             embed.add_field(name="🅰️ Assists", value=str(assists), inline=True)
             embed.add_field(name="⭐ MOTM", value=str(motm), inline=True)
+            
+            # Hat-trick stats (only show if > 0)
+            if hat_tricks > 0:
+                embed.add_field(name="🎩 Hat-tricks", value=str(hat_tricks), inline=True)
+            if assist_hat_tricks > 0:
+                embed.add_field(name="🎯 Assist Hat-tricks", value=str(assist_hat_tricks), inline=True)
             
             embed.add_field(name="📊 Goals/Game", value=f"{goals_per_game:.2f}", inline=True)
             embed.add_field(name="📊 Assists/Game", value=f"{assists_per_game:.2f}", inline=True)
@@ -942,6 +971,8 @@ async def lastmatches(interaction: discord.Interaction):
         app_commands.Choice(name="Pass Accuracy 🎯", value="pass_accuracy"),
         app_commands.Choice(name="Goals Per Game 📈", value="goals_per_game"),
         app_commands.Choice(name="Assists Per Game 📈", value="assists_per_game"),
+        app_commands.Choice(name="Hat-tricks 🎩", value="hat_tricks"),
+        app_commands.Choice(name="Assist Hat-tricks 🎯", value="assist_hat_tricks"),
     ],
 )
 async def leaderboard(interaction: discord.Interaction, category: app_commands.Choice[str]):
@@ -996,6 +1027,10 @@ async def leaderboard(interaction: discord.Interaction, category: app_commands.C
                 await interaction.followup.send("No player data available.", ephemeral=True)
                 return
 
+            # Get hat-trick stats for all players
+            hat_trick_stats = get_all_players_hat_trick_stats(interaction.guild_id)
+            hat_trick_dict = {stat["player_name"]: stat for stat in hat_trick_stats}
+            
             # Calculate derived stats for each player using correct EA API field names
             for m in members:
                 matches = int(m.get("gamesPlayed", 0))
@@ -1015,6 +1050,12 @@ async def leaderboard(interaction: discord.Interaction, category: app_commands.C
                 # Other stats
                 m["_motm"] = int(m.get("manOfTheMatch", 0))
                 m["_rating"] = float(m.get("ratingAve", 0))
+                
+                # Hat-trick stats from match history
+                player_name = m.get("name", "")
+                player_ht_stats = hat_trick_dict.get(player_name, {"hat_tricks": 0, "assist_hat_tricks": 0})
+                m["_hat_tricks"] = player_ht_stats["hat_tricks"]
+                m["_assist_hat_tricks"] = player_ht_stats["assist_hat_tricks"]
 
             # Sort based on category
             cat_value = category.value
@@ -1050,6 +1091,14 @@ async def leaderboard(interaction: discord.Interaction, category: app_commands.C
                 sorted_members = sorted(members, key=lambda m: m["_assists_per_game"], reverse=True)
                 title = "📈 Assists Per Game Leaderboard"
                 format_fn = lambda m: f"{m['_assists_per_game']:.2f} assists/game"
+            elif cat_value == "hat_tricks":
+                sorted_members = sorted(members, key=lambda m: m["_hat_tricks"], reverse=True)
+                title = "🎩 Hat-tricks Leaderboard"
+                format_fn = lambda m: f"{m['_hat_tricks']} hat-trick{'s' if m['_hat_tricks'] != 1 else ''}"
+            elif cat_value == "assist_hat_tricks":
+                sorted_members = sorted(members, key=lambda m: m["_assist_hat_tricks"], reverse=True)
+                title = "🎯 Assist Hat-tricks Leaderboard"
+                format_fn = lambda m: f"{m['_assist_hat_tricks']} assist hat-trick{'s' if m['_assist_hat_tricks'] != 1 else ''}"
             else:
                 sorted_members = members
                 title = "Leaderboard"
