@@ -110,6 +110,41 @@ def init_db():
                     PRIMARY KEY (guild_id, player_name)
                 )
             """)
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS playoff_stats (
+                    guild_id    INTEGER,
+                    player_name TEXT,
+                    playoff_period TEXT,  -- YYYY-MM format for monthly tracking
+                    goals       INTEGER DEFAULT 0,
+                    assists     INTEGER DEFAULT 0,
+                    total_rating REAL DEFAULT 0.0,
+                    matches_played INTEGER DEFAULT 0,
+                    playoff_score REAL DEFAULT 0.0,
+                    updated_at  TEXT NOT NULL,
+                    PRIMARY KEY (guild_id, player_name, playoff_period)
+                )
+            """)
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS playoff_announcements (
+                    guild_id    INTEGER,
+                    playoff_period TEXT,  -- YYYY-MM format
+                    announced_at TEXT NOT NULL,
+                    PRIMARY KEY (guild_id, playoff_period)
+                )
+            """)
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS playoff_club_stats (
+                    guild_id    INTEGER,
+                    playoff_period TEXT,  -- YYYY-MM format
+                    match_id    TEXT,
+                    result      TEXT,  -- W, L, D
+                    goals_for   INTEGER DEFAULT 0,
+                    goals_against INTEGER DEFAULT 0,
+                    clean_sheet INTEGER DEFAULT 0,
+                    played_at   TEXT NOT NULL,
+                    PRIMARY KEY (guild_id, playoff_period, match_id)
+                )
+            """)
             
             # Migration: Add milestone_channel_id column if it doesn't exist
             cursor = db.execute("PRAGMA table_info(settings)")
@@ -120,6 +155,10 @@ def init_db():
             # Migration: Add achievement_channel_id column if it doesn't exist
             if "achievement_channel_id" not in columns:
                 db.execute("ALTER TABLE settings ADD COLUMN achievement_channel_id INTEGER")
+            
+            # Migration: Add playoff_summary_channel_id column if it doesn't exist
+            if "playoff_summary_channel_id" not in columns:
+                db.execute("ALTER TABLE settings ADD COLUMN playoff_summary_channel_id INTEGER")
             
             # Migration: Add hat-trick columns to player_match_history if they don't exist
             cursor = db.execute("PRAGMA table_info(player_match_history)")
@@ -183,14 +222,14 @@ def get_settings(guild_id: int):
     try:
         with sqlite3.connect(DB_PATH) as db:
             cur = db.execute(
-                "SELECT guild_id, club_id, platform, channel_id, last_match_id, autopost, milestone_channel_id, achievement_channel_id FROM settings WHERE guild_id=?",
+                "SELECT guild_id, club_id, platform, channel_id, last_match_id, autopost, milestone_channel_id, achievement_channel_id, playoff_summary_channel_id FROM settings WHERE guild_id=?",
                 (guild_id,),
             )
             row = cur.fetchone()
             if not row:
                 logger.debug(f"[Database] No settings found for guild {guild_id}")
                 return None
-            keys = ["guild_id", "club_id", "platform", "channel_id", "last_match_id", "autopost", "milestone_channel_id", "achievement_channel_id"]
+            keys = ["guild_id", "club_id", "platform", "channel_id", "last_match_id", "autopost", "milestone_channel_id", "achievement_channel_id", "playoff_summary_channel_id"]
             result = dict(zip(keys, row))
             logger.debug(f"[Database] Retrieved settings for guild {guild_id}: club_id={result.get('club_id')}, platform={result.get('platform')}, autopost={result.get('autopost')}")
             return result
@@ -524,5 +563,196 @@ def get_all_players_hat_trick_stats(guild_id: int) -> list[dict]:
     except Exception as e:
         logger.error(f"[Database] ❌ Failed to get hat-trick stats: {e}", exc_info=True)
         return []
+
+
+# ---------- Playoff Stats Functions ----------
+
+def update_playoff_stats(guild_id: int, player_name: str, playoff_period: str, goals: int, assists: int, rating: float):
+    """Update playoff stats for a player in a specific playoff period."""
+    logger.debug(f"[Database] Updating playoff stats: player={player_name}, period={playoff_period}, goals={goals}, assists={assists}, rating={rating}")
+    try:
+        with sqlite3.connect(DB_PATH) as db:
+            # Get current stats
+            cur = db.execute(
+                "SELECT goals, assists, total_rating, matches_played FROM playoff_stats WHERE guild_id=? AND player_name=? AND playoff_period=?",
+                (guild_id, player_name, playoff_period)
+            )
+            row = cur.fetchone()
+            
+            if row:
+                # Update existing record
+                current_goals, current_assists, current_total_rating, current_matches = row
+                new_goals = current_goals + goals
+                new_assists = current_assists + assists
+                new_total_rating = current_total_rating + rating
+                new_matches = current_matches + 1
+            else:
+                # Create new record
+                new_goals = goals
+                new_assists = assists
+                new_total_rating = rating
+                new_matches = 1
+            
+            # Calculate playoff score: (Goals × 10) + (Assists × 7) + (Average Rating × 5) + (Matches Played × 2)
+            avg_rating = new_total_rating / new_matches if new_matches > 0 else 0
+            playoff_score = (new_goals * 10) + (new_assists * 7) + (avg_rating * 5) + (new_matches * 2)
+            
+            # Insert or update
+            db.execute(
+                """
+                INSERT OR REPLACE INTO playoff_stats 
+                (guild_id, player_name, playoff_period, goals, assists, total_rating, matches_played, playoff_score, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (guild_id, player_name, playoff_period, new_goals, new_assists, new_total_rating, new_matches, playoff_score, datetime.utcnow().isoformat())
+            )
+            db.commit()
+        logger.debug(f"[Database] ✅ Playoff stats updated successfully")
+    except Exception as e:
+        logger.error(f"[Database] ❌ Failed to update playoff stats: {e}", exc_info=True)
+        raise
+
+
+def get_playoff_stats(guild_id: int, playoff_period: str) -> list[dict]:
+    """Get all player playoff stats for a specific period."""
+    try:
+        with sqlite3.connect(DB_PATH) as db:
+            cur = db.execute(
+                """
+                SELECT player_name, goals, assists, total_rating, matches_played, playoff_score
+                FROM playoff_stats 
+                WHERE guild_id=? AND playoff_period=?
+                ORDER BY playoff_score DESC
+                """,
+                (guild_id, playoff_period)
+            )
+            rows = cur.fetchall()
+            return [
+                {
+                    "player_name": row[0],
+                    "goals": row[1],
+                    "assists": row[2],
+                    "total_rating": row[3],
+                    "matches_played": row[4],
+                    "playoff_score": row[5],
+                    "avg_rating": row[3] / row[4] if row[4] > 0 else 0
+                }
+                for row in rows
+            ]
+    except Exception as e:
+        logger.error(f"[Database] ❌ Failed to get playoff stats: {e}", exc_info=True)
+        return []
+
+
+def has_playoff_been_announced(guild_id: int, playoff_period: str) -> bool:
+    """Check if playoff summary has been announced for this period."""
+    try:
+        with sqlite3.connect(DB_PATH) as db:
+            cur = db.execute(
+                "SELECT 1 FROM playoff_announcements WHERE guild_id=? AND playoff_period=?",
+                (guild_id, playoff_period)
+            )
+            exists = cur.fetchone() is not None
+            logger.debug(f"[Database] Playoff announcement check: period={playoff_period} = {'already announced' if exists else 'NOT announced'}")
+            return exists
+    except Exception as e:
+        logger.error(f"[Database] ❌ Failed to check playoff announcement: {e}", exc_info=True)
+        return False
+
+
+def mark_playoff_announced(guild_id: int, playoff_period: str):
+    """Mark that playoff summary has been announced for this period."""
+    logger.debug(f"[Database] Marking playoff as announced: guild={guild_id}, period={playoff_period}")
+    try:
+        with sqlite3.connect(DB_PATH) as db:
+            db.execute(
+                """
+                INSERT OR IGNORE INTO playoff_announcements (guild_id, playoff_period, announced_at)
+                VALUES (?, ?, ?)
+                """,
+                (guild_id, playoff_period, datetime.utcnow().isoformat())
+            )
+            db.commit()
+        logger.debug(f"[Database] ✅ Playoff announcement marked")
+    except Exception as e:
+        logger.error(f"[Database] ❌ Failed to mark playoff announcement: {e}", exc_info=True)
+        raise
+
+
+def count_playoff_matches(guild_id: int, playoff_period: str) -> int:
+    """Count total playoff matches played in a period."""
+    try:
+        with sqlite3.connect(DB_PATH) as db:
+            cur = db.execute(
+                "SELECT COUNT(DISTINCT match_id) FROM playoff_club_stats WHERE guild_id=? AND playoff_period=?",
+                (guild_id, playoff_period)
+            )
+            result = cur.fetchone()
+            return result[0] if result and result[0] else 0
+    except Exception as e:
+        logger.error(f"[Database] ❌ Failed to count playoff matches: {e}", exc_info=True)
+        return 0
+
+
+def record_playoff_match(guild_id: int, playoff_period: str, match_id: str, result: str, goals_for: int, goals_against: int, clean_sheet: bool):
+    """Record a playoff match result for club statistics."""
+    logger.debug(f"[Database] Recording playoff match: guild={guild_id}, period={playoff_period}, match={match_id}, result={result}")
+    try:
+        with sqlite3.connect(DB_PATH) as db:
+            db.execute(
+                """
+                INSERT OR IGNORE INTO playoff_club_stats 
+                (guild_id, playoff_period, match_id, result, goals_for, goals_against, clean_sheet, played_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (guild_id, playoff_period, match_id, result, goals_for, goals_against, 1 if clean_sheet else 0, datetime.utcnow().isoformat())
+            )
+            db.commit()
+        logger.debug(f"[Database] ✅ Playoff match recorded")
+    except Exception as e:
+        logger.error(f"[Database] ❌ Failed to record playoff match: {e}", exc_info=True)
+        raise
+
+
+def get_playoff_club_stats(guild_id: int, playoff_period: str) -> dict:
+    """Get aggregated club statistics for a playoff period."""
+    try:
+        with sqlite3.connect(DB_PATH) as db:
+            cur = db.execute(
+                """
+                SELECT 
+                    COUNT(*) as total_matches,
+                    SUM(CASE WHEN result = 'W' THEN 1 ELSE 0 END) as wins,
+                    SUM(CASE WHEN result = 'L' THEN 1 ELSE 0 END) as losses,
+                    SUM(CASE WHEN result = 'D' THEN 1 ELSE 0 END) as draws,
+                    SUM(goals_for) as total_goals_for,
+                    SUM(goals_against) as total_goals_against,
+                    SUM(clean_sheet) as clean_sheets
+                FROM playoff_club_stats
+                WHERE guild_id=? AND playoff_period=?
+                """,
+                (guild_id, playoff_period)
+            )
+            row = cur.fetchone()
+            if row and row[0]:
+                wins, losses, draws = row[1] or 0, row[2] or 0, row[3] or 0
+                total_matches = row[0]
+                win_rate = (wins / total_matches * 100) if total_matches > 0 else 0
+                
+                return {
+                    "total_matches": total_matches,
+                    "wins": wins,
+                    "losses": losses,
+                    "draws": draws,
+                    "win_rate": win_rate,
+                    "goals_for": row[4] or 0,
+                    "goals_against": row[5] or 0,
+                    "goal_difference": (row[4] or 0) - (row[5] or 0),
+                    "clean_sheets": row[6] or 0
+                }
+            return None
+    except Exception as e:
+        logger.error(f"[Database] ❌ Failed to get playoff club stats: {e}", exc_info=True)
+        return None
 
 

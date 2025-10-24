@@ -81,6 +81,7 @@ from achievements import (
     check_achievements, announce_achievements,
     check_historical_achievements, announce_historical_achievements
 )
+from playoffs import is_playoff_match, process_playoff_match
 from utils.ea_api import (
     platform_from_choice, parse_club_id_from_any, warmup_session,
     fetch_club_info, fetch_latest_match, fetch_json, HTTP_TIMEOUT,
@@ -255,6 +256,11 @@ class ProClubsBot(discord.Client):
                     # Step 7: Update database with new match ID
                     set_last_match_id(guild_id, str(match_id))
                     logger.info(f"✅ [Guild {guild_id}] Successfully posted match {match_id} and updated database")
+                    
+                    # Step 7.5: Check if this is a playoff match and process accordingly
+                    if is_playoff_match(mt):
+                        logger.info(f"[Guild {guild_id}] Playoff match detected: {match_id}")
+                        await process_playoff_match(self, guild_id, match, mt, club_id)
                     
                     # Step 8: Check for milestones and achievements
                     logger.debug(f"[Guild {guild_id}] Checking for player milestones and achievements...")
@@ -495,6 +501,39 @@ async def setachievementchannel(interaction: discord.Interaction, channel: disco
     await interaction.followup.send(
         f"✅ Achievement notifications will be posted in {channel.mention}.\n\n"
         f"Use `/listachievements` to see all available achievements!",
+        ephemeral=True
+    )
+
+
+@client.tree.command(name="setplayoffsummarychannel", description="Set the channel for playoff summary announcements.")
+@app_commands.describe(channel="Channel to receive playoff summaries")
+async def setplayoffsummarychannel(interaction: discord.Interaction, channel: discord.TextChannel):
+    """
+    Command: /setplayoffsummarychannel
+    Sets the Discord channel where "Player of the Playoffs" announcements will be posted.
+    These are posted monthly after 15 playoff matches are completed.
+    """
+    await interaction.response.defer(ephemeral=True)
+    logger.info(f"[Command: setplayoffsummarychannel] User {interaction.user} in guild {interaction.guild_id} setting playoff summary channel to #{channel.name} (ID: {channel.id})")
+    
+    # Check if club has been configured first
+    st = get_settings(interaction.guild_id)
+    if not st or not st.get("club_id"):
+        logger.warning(f"[Command: setplayoffsummarychannel] Guild {interaction.guild_id} tried to set playoff summary channel without setting club first")
+        await interaction.followup.send("Set a club first with `/setclub`.", ephemeral=True)
+        return
+
+    # Save playoff summary channel settings
+    logger.debug(f"[Command: setplayoffsummarychannel] Saving playoff summary channel to database: guild_id={interaction.guild_id}, playoff_summary_channel_id={channel.id}")
+    upsert_settings(interaction.guild_id, playoff_summary_channel_id=channel.id)
+    logger.info(f"✅ [Command: setplayoffsummarychannel] Guild {interaction.guild_id} set playoff summary channel to #{channel.name} (ID: {channel.id})")
+    await interaction.followup.send(
+        f"✅ Playoff summaries will be posted in {channel.mention}.\n\n"
+        f"**Playoff Summary includes:**\n"
+        f"🏆 Player of the Playoffs winner\n"
+        f"📊 Top 3 performers\n"
+        f"⭐ Performance scores\n\n"
+        f"*Summaries are posted automatically after 15 playoff matches each month.*",
         ephemeral=True
     )
 
