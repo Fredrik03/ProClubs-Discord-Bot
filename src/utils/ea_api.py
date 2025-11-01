@@ -256,7 +256,6 @@ async def fetch_latest_match(session, platform: str, club_id: int):
     params = {
         "platform": platform,
         "clubIds": str(club_id),
-        "matchType": "leagueMatch",  # Only fetch league matches
         "maxResultCount": "1"  # Only get the most recent match
     }
     
@@ -268,12 +267,19 @@ async def fetch_latest_match(session, platform: str, club_id: int):
         
         if matches and len(matches) > 0:
             newest = matches[0]  # Matches are pre-sorted by EA API (newest first)
-            match_type = "league"
+            
+            # Detect match type from the response data
+            # Try to determine if it's a playoff match or league match
+            match_type = newest.get("matchType", "unknown")
+            if match_type == "unknown":
+                # Fallback: try to detect from other fields
+                # For now, assume league if we can't determine
+                match_type = "league"
             
             # Log match details for debugging
             match_id = newest.get("matchId", "unknown")
             timestamp = newest.get("timestamp", 0)
-            logger.info(f"[EA API] ✅ Found latest match for club {club_id}: match_id={match_id}, timestamp={timestamp}")
+            logger.info(f"[EA API] ✅ Found latest match for club {club_id}: match_id={match_id}, timestamp={timestamp}, type={match_type}")
             return newest, match_type
         else:
             logger.debug(f"[EA API] No matches found for club {club_id}")
@@ -283,24 +289,35 @@ async def fetch_latest_match(session, platform: str, club_id: int):
     return None, None
 
 
-async def fetch_all_matches(session, platform: str, club_id: int, max_count: int = 100):
+async def fetch_all_matches(session, platform: str, club_id: int, max_count: int = 100, match_type: str = None):
     """
     Get matches from the club's match history.
     Returns list of match dicts or empty list
+    
+    Args:
+        session: aiohttp ClientSession
+        platform: Platform string (e.g., "common-gen5" or "common-gen4")
+        club_id: Numeric club ID
+        max_count: Maximum number of matches to fetch
+        match_type: Optional match type filter (e.g., "leagueMatch", "playoffMatch")
     """
-    # Use the working endpoint with leagueMatch type
+    # Use the working endpoint - fetch all match types by default
     params = {
         "platform": platform,
         "clubIds": str(club_id),
-        "matchType": "leagueMatch",
         "maxResultCount": str(max_count)
     }
+    
+    # Add match type filter if specified
+    if match_type:
+        params["matchType"] = match_type
     
     try:
         payload = await fetch_json(session, "/clubs/matches", params)
         matches = payload if isinstance(payload, list) else payload.get("matches", [])
         if matches:
-            logger.info(f"Found {len(matches)} league matches for club {club_id}")
+            match_type_str = match_type if match_type else "all types"
+            logger.info(f"Found {len(matches)} matches for club {club_id} (type: {match_type_str})")
             return matches
     except Exception as e:
         logger.warning(f"Failed fetching matches: {e}")
