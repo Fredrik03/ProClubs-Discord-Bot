@@ -169,8 +169,13 @@ class ProClubsBot(discord.Client):
                 logger.info(f"Checking guild {guild_id}: club_id={club_id}, platform={platform}, channel_id={channel_id}, autopost={autopost}, last_match_id={last_match_id}")
                 
                 # Verify all required settings are present
-                if not (club_id and platform and channel_id and autopost):
-                    logger.warning(f"Guild {guild_id} missing required settings (club_id={club_id}, platform={platform}, channel_id={channel_id}, autopost={autopost})")
+                # Check if autopost is enabled (explicitly check for 1, not just truthy)
+                if not club_id or not platform or not channel_id:
+                    logger.warning(f"Guild {guild_id} missing required settings (club_id={club_id}, platform={platform}, channel_id={channel_id})")
+                    continue
+                
+                if autopost != 1:
+                    logger.debug(f"Guild {guild_id} autopost is disabled (autopost={autopost}), skipping")
                     continue
                 
                 try:
@@ -195,9 +200,15 @@ class ProClubsBot(discord.Client):
                     logger.debug(f"[Guild {guild_id}] Fetching latest match...")
                     match, mt = await fetch_latest_match(session, used_platform, club_id)
                     
-                    if not match or not mt:
-                        logger.debug(f"[Guild {guild_id}] No matches found or no match data available")
+                    if not match:
+                        logger.debug(f"[Guild {guild_id}] No matches found for club {club_id}")
                         continue
+                    
+                    if not mt:
+                        logger.warning(f"[Guild {guild_id}] Match found but match_type is None/empty, defaulting to 'league'")
+                        mt = "league"
+                    
+                    logger.info(f"[Guild {guild_id}] Found match: type={mt}, timestamp={match.get('timestamp', 'unknown')}")
 
                     # Step 3: Extract match ID (EA API format is inconsistent)
                     match_id = match.get("matchJson")
@@ -226,12 +237,14 @@ class ProClubsBot(discord.Client):
                         match_id = f"{match.get('timestamp', 0)}:{our_score}-{opp_score}"
                         logger.debug(f"[Guild {guild_id}] Using fallback match ID: {match_id}")
                     
-                    logger.info(f"[Guild {guild_id}] Latest match ID: {match_id}")
+                    logger.info(f"[Guild {guild_id}] Latest match ID: {match_id}, Last posted match ID: {last_match_id}")
 
                     # Step 4: Check if we've already posted this match
                     if str(match_id) == str(last_match_id):
-                        logger.debug(f"[Guild {guild_id}] Match {match_id} already posted, skipping")
+                        logger.info(f"[Guild {guild_id}] Match {match_id} already posted (matches last_match_id {last_match_id}), skipping")
                         continue  # already posted
+                    
+                    logger.info(f"[Guild {guild_id}] NEW match detected! Match ID {match_id} differs from last posted {last_match_id}")
 
                     # Step 5: Get the Discord channel to post to
                     logger.debug(f"[Guild {guild_id}] New match detected! Fetching Discord channel {channel_id}...")
