@@ -240,6 +240,12 @@ async def fetch_latest_match(session, platform: str, club_id: int):
     """
     Get the newest match from the club's match history.
     
+    EA API may require matchType parameter. Try different match types:
+    - leagueMatch (league matches)
+    - gameType11 (general matches)
+    - playoffMatch (playoff matches)
+    - No matchType (all matches)
+    
     Args:
         session: aiohttp ClientSession
         platform: Platform string (e.g., "common-gen5" or "common-gen4")
@@ -252,40 +258,74 @@ async def fetch_latest_match(session, platform: str, club_id: int):
     """
     logger.debug(f"[EA API] Fetching latest match for club {club_id} on platform {platform}")
     
-    # EA API parameters for fetching matches
-    params = {
-        "platform": platform,
-        "clubIds": str(club_id),
-        "maxResultCount": "1"  # Only get the most recent match
-    }
+    # Try different endpoint paths and match types - EA API may have changed
+    endpoint_attempts = [
+        "/clubs/matches",  # Current endpoint
+        "/matches",        # Alternative endpoint (without /clubs prefix)
+    ]
     
-    try:
-        payload = await fetch_json(session, "/clubs/matches", params)
-        
-        # EA API may return different formats
-        matches = payload if isinstance(payload, list) else payload.get("matches", [])
-        
-        if matches and len(matches) > 0:
-            newest = matches[0]  # Matches are pre-sorted by EA API (newest first)
-            
-            # Detect match type from the response data
-            # Try to determine if it's a playoff match or league match
-            match_type = newest.get("matchType", "unknown")
-            if match_type == "unknown":
-                # Fallback: try to detect from other fields
-                # For now, assume league if we can't determine
-                match_type = "league"
-            
-            # Log match details for debugging
-            match_id = newest.get("matchId", "unknown")
-            timestamp = newest.get("timestamp", 0)
-            logger.info(f"[EA API] ✅ Found latest match for club {club_id}: match_id={match_id}, timestamp={timestamp}, type={match_type}")
-            return newest, match_type
-        else:
-            logger.debug(f"[EA API] No matches found for club {club_id}")
-    except Exception as e:
-        logger.error(f"[EA API] ❌ Failed fetching latest match for club {club_id}: {e}", exc_info=True)
+    match_type_attempts = [
+        "leagueMatch",  # Try league matches first (most common)
+        "gameType11",   # Generic match type
+        None,           # No matchType (all matches)
+        "playoffMatch", # Playoff matches
+    ]
     
+    for endpoint_path in endpoint_attempts:
+        for match_type_attempt in match_type_attempts:
+            # EA API parameters for fetching matches
+            params = {
+                "platform": platform,
+                "clubIds": str(club_id),
+                "maxResultCount": "1"  # Only get the most recent match
+            }
+            
+            # Add matchType if specified
+            if match_type_attempt:
+                params["matchType"] = match_type_attempt
+            
+            try:
+                logger.debug(f"[EA API] Attempting {endpoint_path} with matchType={match_type_attempt or 'none'}")
+                payload = await fetch_json(session, endpoint_path, params)
+                
+                # EA API may return different formats
+                matches = payload if isinstance(payload, list) else payload.get("matches", [])
+                
+                if matches and len(matches) > 0:
+                    newest = matches[0]  # Matches are pre-sorted by EA API (newest first)
+                    
+                    # Detect match type from the response data
+                    # Try to determine if it's a playoff match or league match
+                    match_type = newest.get("matchType", "unknown")
+                    if match_type == "unknown":
+                        # Use the matchType we used to fetch if available
+                        match_type = match_type_attempt or "league"
+                    
+                    # Log match details for debugging
+                    match_id = newest.get("matchId", "unknown")
+                    timestamp = newest.get("timestamp", 0)
+                    logger.info(f"[EA API] ✅ Found latest match for club {club_id}: match_id={match_id}, timestamp={timestamp}, type={match_type}")
+                    return newest, match_type
+                else:
+                    logger.debug(f"[EA API] No matches found for club {club_id} with {endpoint_path} and matchType={match_type_attempt or 'none'}")
+                    continue  # Try next matchType
+            except RuntimeError as e:
+                # HTTP 400 or other API errors - try next matchType or endpoint
+                error_msg = str(e)
+                if "400" in error_msg or "Bad Request" in error_msg:
+                    logger.debug(f"[EA API] HTTP 400 with {endpoint_path} and matchType={match_type_attempt or 'none'}, trying next option...")
+                    continue
+                else:
+                    # Other errors (network, etc.) - log and try next
+                    logger.debug(f"[EA API] Error with {endpoint_path} and matchType={match_type_attempt or 'none'}: {e}, trying next option...")
+                    continue
+            except Exception as e:
+                # Other unexpected errors - log and try next
+                logger.debug(f"[EA API] Unexpected error with {endpoint_path} and matchType={match_type_attempt or 'none'}: {e}, trying next option...")
+                continue
+    
+    # All attempts failed
+    logger.error(f"[EA API] ❌ All endpoint and matchType combinations failed for club {club_id}")
     return None, None
 
 
