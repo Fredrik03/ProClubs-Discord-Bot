@@ -237,38 +237,75 @@ class ProClubsBot(discord.Client):
                         match_id = f"{match.get('timestamp', 0)}:{our_score}-{opp_score}"
                         logger.debug(f"[Guild {guild_id}] Using fallback match ID: {match_id}")
                     
-                    logger.info(f"[Guild {guild_id}] Latest match ID: {match_id}, Last posted match ID: {last_match_id}")
+                    logger.info(f"[Guild {guild_id}] Latest match ID: {match_id}, Last posted match ID: {last_match_id or 'None (no matches posted yet)'}")
 
                     # Step 4: Check if we've already posted this match
-                    if str(match_id) == str(last_match_id):
+                    # Handle None last_match_id (first time posting)
+                    if last_match_id is not None and str(match_id) == str(last_match_id):
                         logger.info(f"[Guild {guild_id}] Match {match_id} already posted (matches last_match_id {last_match_id}), skipping")
                         continue  # already posted
                     
-                    logger.info(f"[Guild {guild_id}] NEW match detected! Match ID {match_id} differs from last posted {last_match_id}")
+                    logger.info(f"[Guild {guild_id}] NEW match detected! Match ID {match_id} differs from last posted {last_match_id or '(none)'}")
 
                     # Step 5: Get the Discord channel to post to
                     logger.debug(f"[Guild {guild_id}] New match detected! Fetching Discord channel {channel_id}...")
-                    channel = self.get_channel(int(channel_id))
-                    if channel is None:
-                        logger.error(f"[Guild {guild_id}] Could not find channel {channel_id} - bot may not have access")
+                    try:
+                        # Try get_channel first (fast, but requires channel in cache)
+                        channel = self.get_channel(int(channel_id))
+                        # If not in cache, fetch it from Discord
+                        if channel is None:
+                            logger.debug(f"[Guild {guild_id}] Channel {channel_id} not in cache, fetching from Discord...")
+                            channel = await self.fetch_channel(int(channel_id))
+                        if channel is None:
+                            logger.error(f"[Guild {guild_id}] Could not find channel {channel_id} - bot may not have access")
+                            continue
+                        logger.debug(f"[Guild {guild_id}] Found channel: {channel.name} (ID: {channel_id})")
+                    except discord.Forbidden:
+                        logger.error(f"[Guild {guild_id}] Bot does not have access to channel {channel_id}")
+                        continue
+                    except discord.NotFound:
+                        logger.error(f"[Guild {guild_id}] Channel {channel_id} not found")
+                        continue
+                    except Exception as channel_error:
+                        logger.error(f"[Guild {guild_id}] Error fetching channel {channel_id}: {channel_error}", exc_info=True)
                         continue
 
                     # Step 6: Build the match embed and post it
                     logger.debug(f"[Guild {guild_id}] Building match embed...")
-                    embed = build_match_embed(
-                        club_id,
-                        used_platform,
-                        match,
-                        mt,
-                        club_name_hint=club_name,
-                    )
+                    try:
+                        embed = build_match_embed(
+                            club_id,
+                            used_platform,
+                            match,
+                            mt,
+                            club_name_hint=club_name,
+                        )
+                        logger.debug(f"[Guild {guild_id}] Match embed built successfully")
+                    except Exception as embed_error:
+                        logger.error(f"[Guild {guild_id}] Failed to build match embed: {embed_error}", exc_info=True)
+                        continue
                     
                     logger.info(f"[Guild {guild_id}] Posting new match {match_id} to channel {channel.name} ({channel_id})")
-                    await channel.send(embed=embed)
+                    try:
+                        await channel.send(embed=embed)
+                        logger.info(f"✅ [Guild {guild_id}] Successfully sent match {match_id} to Discord channel")
+                    except discord.Forbidden as perm_error:
+                        logger.error(f"[Guild {guild_id}] Permission denied posting to channel {channel_id}: {perm_error}")
+                        continue
+                    except discord.HTTPException as http_error:
+                        logger.error(f"[Guild {guild_id}] HTTP error posting to channel {channel_id}: {http_error}")
+                        continue
+                    except Exception as send_error:
+                        logger.error(f"[Guild {guild_id}] Unexpected error posting to channel {channel_id}: {send_error}", exc_info=True)
+                        continue
                     
-                    # Step 7: Update database with new match ID
-                    set_last_match_id(guild_id, str(match_id))
-                    logger.info(f"✅ [Guild {guild_id}] Successfully posted match {match_id} and updated database")
+                    # Step 7: Update database with new match ID (only if send succeeded)
+                    try:
+                        set_last_match_id(guild_id, str(match_id))
+                        logger.info(f"✅ [Guild {guild_id}] Successfully posted match {match_id} and updated database")
+                    except Exception as db_error:
+                        logger.error(f"[Guild {guild_id}] Failed to update last_match_id in database: {db_error}", exc_info=True)
+                        # Don't continue here - match was posted, just DB update failed
                     
                     # Step 7.5: Check if this is a playoff match and process accordingly
                     if is_playoff_match(mt):
