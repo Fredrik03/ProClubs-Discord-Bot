@@ -97,6 +97,7 @@ except Exception:
 _pw = None
 _pw_browser = None
 _pw_context = None
+_pw_page = None  # Persistent page on EA domain for fetch() calls
 _pw_init_lock = None
 
 
@@ -142,37 +143,85 @@ def _build_url(path: str, params: dict) -> str:
     return f"{EA_BASE}{path}?{urlencode(params)}"
 
 
-async def _ensure_playwright_context():
-    global _pw, _pw_browser, _pw_context, _pw_init_lock
-    if _pw_context is not None:
-        return _pw_context
+async def _ensure_playwright_page():
+    """Ensure a persistent Playwright page on the EA domain.
+
+    Uses the system Chrome (channel="chrome") instead of bundled Chromium to
+    bypass Akamai bot detection. Keeps a persistent page open on the EA site
+    so that API calls can be made via fetch() with valid Akamai cookies.
+    """
+    global _pw, _pw_browser, _pw_context, _pw_page, _pw_init_lock
+    if _pw_page is not None:
+        return _pw_page
 
     if _pw_init_lock is None:
         _pw_init_lock = asyncio.Lock()
 
     async with _pw_init_lock:
-        if _pw_context is not None:
-            return _pw_context
+        if _pw_page is not None:
+            return _pw_page
 
         if not PLAYWRIGHT_AVAILABLE:
             raise RuntimeError("Playwright is not installed")
 
         _pw = await async_playwright().start()
-        _pw_browser = await _pw.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-http2"],
-        )
+
+        # Try system Chrome first (harder for Akamai to fingerprint),
+        # fall back to bundled Chromium if Chrome isn't installed
+        for channel in ("chrome", None):
+            try:
+                _pw_browser = await _pw.chromium.launch(
+                    headless=True,
+                    channel=channel,
+                    args=[
+                        "--no-sandbox",
+                        "--disable-dev-shm-usage",
+                        "--disable-http2",
+                        "--disable-blink-features=AutomationControlled",
+                    ],
+                )
+                logger.info(f"[EA API] Launched browser (channel={channel or 'bundled chromium'})")
+                break
+            except Exception as e:
+                if channel is not None:
+                    logger.info(f"[EA API] System Chrome not available, trying bundled Chromium: {e}")
+                    continue
+                raise
+
         _pw_context = await _pw_browser.new_context(
             user_agent=HEADERS["User-Agent"],
             locale="en-US",
             extra_http_headers={
-                "Accept": HEADERS["Accept"],
                 "Referer": HEADERS["Referer"],
-                "Origin": HEADERS.get("Origin", "https://proclubs.ea.com"),
             },
         )
+        # Hide automation indicators from Akamai bot detection
+        await _pw_context.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            // Remove Playwright/headless indicators
+            delete window.cdc_adoQpoasnfa76pfcZLmcfl_Array;
+            delete window.cdc_adoQpoasnfa76pfcZLmcfl_Promise;
+            delete window.cdc_adoQpoasnfa76pfcZLmcfl_Symbol;
+        """)
+
+        # Navigate to EA site — Akamai will run its bot detection JS and set cookies
+        _pw_page = await _pw_context.new_page()
+        try:
+            resp = await _pw_page.goto(SITE_URL, wait_until="networkidle", timeout=30000)
+            status = resp.status if resp else 'N/A'
+            logger.info(f"[EA API] Warmup: visited {SITE_URL} (status {status})")
+
+            if resp and resp.status == 403:
+                # Akamai may need time to run its JS challenge and set _abck cookie
+                logger.info("[EA API] Got 403, waiting for Akamai bot detection JS...")
+                await _pw_page.wait_for_timeout(5000)
+                resp2 = await _pw_page.reload(wait_until="networkidle", timeout=15000)
+                logger.info(f"[EA API] Warmup reload: status {resp2.status if resp2 else 'N/A'}")
+        except Exception as e:
+            logger.warning(f"[EA API] Warmup navigation failed (non-fatal): {e}")
+
         logger.info("[EA API] Playwright transport initialized")
-        return _pw_context
+        return _pw_page
 
 
 async def _get_json(session: aiohttp.ClientSession, url: str, params: dict):
@@ -183,27 +232,37 @@ async def _get_json(session: aiohttp.ClientSession, url: str, params: dict):
 
 
 async def _get_json_playwright(path: str, params: dict):
-    """GET JSON using a real browser context via Playwright."""
-    context = await _ensure_playwright_context()
-    page = await context.new_page()
+    """GET JSON using fetch() from the persistent EA domain page.
+
+    Because the page has already passed Akamai's bot detection and has valid
+    cookies (_abck, bm_sz), fetch() calls from within it succeed where direct
+    HTTP requests would be blocked with 403.
+    """
+    page = await _ensure_playwright_page()
     url = _build_url(path, params)
     try:
-        response = await page.goto(url, wait_until="domcontentloaded", timeout=EA_PLAYWRIGHT_TIMEOUT_MS)
-        if response is None:
-            raise RuntimeError(f"No response received for {url}")
+        result = await page.evaluate(
+            """async (url) => {
+                const resp = await fetch(url, {
+                    method: 'GET',
+                    credentials: 'include',
+                    headers: { 'Accept': 'application/json, text/plain, */*' }
+                });
+                return { status: resp.status, body: await resp.text() };
+            }""",
+            url,
+        )
+    except Exception as e:
+        raise RuntimeError(f"Playwright fetch failed for {url}: {e}")
 
-        status = response.status
-        if status >= 400:
-            text = await page.evaluate("() => document.body ? document.body.innerText : ''")
-            raise EAApiHttpError(status, url, f"{status}, body='{text[:200]}'")
+    status = result["status"]
+    body = result["body"]
+    logger.debug(f"[EA API] Playwright fetch for {path}: status={status}, body_len={len(body)}")
 
-        body_text = await page.evaluate("() => document.body ? document.body.innerText : ''")
-        try:
-            return json.loads(body_text)
-        except Exception:
-            return await response.json()
-    finally:
-        await page.close()
+    if status >= 400:
+        raise EAApiHttpError(status, url, f"{status}, body='{body[:200]}'")
+
+    return json.loads(body)
 
 
 async def warmup_session(session: aiohttp.ClientSession):
@@ -220,12 +279,7 @@ async def warmup_session(session: aiohttp.ClientSession):
     logger.debug("[EA API] Warming up session by visiting EA's website...")
     if EA_USE_PLAYWRIGHT and PLAYWRIGHT_AVAILABLE:
         try:
-            context = await _ensure_playwright_context()
-            page = await context.new_page()
-            try:
-                await page.goto(SITE_URL, wait_until="domcontentloaded", timeout=EA_PLAYWRIGHT_TIMEOUT_MS)
-            finally:
-                await page.close()
+            await _ensure_playwright_page()  # Warmup happens during page init
             logger.debug("[EA API] Playwright warmup complete")
             return
         except Exception as e:
