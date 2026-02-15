@@ -160,7 +160,7 @@ async def _ensure_playwright_context():
         _pw = await async_playwright().start()
         _pw_browser = await _pw.chromium.launch(
             headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage"],
+            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-http2"],
         )
         _pw_context = await _pw_browser.new_context(
             user_agent=HEADERS["User-Agent"],
