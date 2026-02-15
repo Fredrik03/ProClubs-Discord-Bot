@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m playwright install:*)",
+      "Bash(pip show:*)",
+      "Bash(python:*)",
+      "Bash(curl:*)"
+    ]
+  }
+}
