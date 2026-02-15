@@ -231,12 +231,26 @@ async def _get_json(session: aiohttp.ClientSession, url: str, params: dict):
         return await r.json()
 
 
+async def _reset_playwright_page():
+    """Reset the persistent page by navigating back to the EA site."""
+    global _pw_page
+    if _pw_page is not None:
+        try:
+            await _pw_page.close()
+        except Exception:
+            pass
+        _pw_page = None
+
+
 async def _get_json_playwright(path: str, params: dict):
     """GET JSON using fetch() from the persistent EA domain page.
 
     Because the page has already passed Akamai's bot detection and has valid
     cookies (_abck, bm_sz), fetch() calls from within it succeed where direct
     HTTP requests would be blocked with 403.
+
+    If fetch() fails (e.g. stale page context), the page is reset and
+    re-initialized on the next call.
     """
     page = await _ensure_playwright_page()
     url = _build_url(path, params)
@@ -253,6 +267,9 @@ async def _get_json_playwright(path: str, params: dict):
             url,
         )
     except Exception as e:
+        # Page context is likely dead/stale — reset it for next attempt
+        logger.warning(f"[EA API] fetch() failed, resetting page for next retry: {e}")
+        await _reset_playwright_page()
         raise RuntimeError(f"Playwright fetch failed for {url}: {e}")
 
     status = result["status"]
