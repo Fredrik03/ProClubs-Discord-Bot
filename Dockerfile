@@ -1,13 +1,12 @@
-# Use Python 3.11 slim image
-FROM python:3.11-slim
+# Use official Playwright Python image (includes Chromium + required OS deps)
+FROM mcr.microsoft.com/playwright/python:v1.52.0-jammy
 
 # Set working directory
 WORKDIR /app
 
 # Copy requirements and install dependencies
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt \
-    && python -m playwright install --with-deps chromium
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy source code
 COPY src/ ./src/
