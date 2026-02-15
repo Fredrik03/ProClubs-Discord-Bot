@@ -61,13 +61,14 @@ logger = logging.getLogger('ProClubsBot.EA_API')
 
 EA_BASE = "https://proclubs.ea.com/api/fc"
 SITE_URL = "https://proclubs.ea.com/"
-SITE_REFERER = "https://proclubs.ea.com/fc/clubs/overview"
+SITE_REFERER = "https://proclubs.ea.com/"
 
 # Browser-like headers improve success rate with EA's edge/WAF
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
     "Accept": "application/json, text/plain, */*",
-    "Referer": "https://www.ea.com/",
+    "Referer": "https://proclubs.ea.com/",
+    "Origin": "https://proclubs.ea.com",
     "Accept-Language": "en-US,en;q=0.9",
     "Accept-Encoding": "gzip, deflate, br",
     "Connection": "keep-alive",
@@ -80,6 +81,14 @@ HEADERS = {
 }
 
 HTTP_TIMEOUT = aiohttp.ClientTimeout(total=12, connect=5)
+
+
+class EAApiForbiddenError(RuntimeError):
+    """Raised when EA API consistently returns HTTP 403."""
+
+    def __init__(self, path: str, message: str):
+        super().__init__(message)
+        self.path = path
 
 
 def platform_from_choice(gen: str | None) -> str:
@@ -204,6 +213,8 @@ async def fetch_json(session: aiohttp.ClientSession, path: str, params: dict, ma
             break
 
     logger.error(f"[EA API] ❌ All {max_attempts} attempts failed for {path}: {last_exc}")
+    if isinstance(last_exc, aiohttp.ClientResponseError) and last_exc.status == 403:
+        raise EAApiForbiddenError(path, f"EA API forbidden after {max_attempts} attempts: {last_exc}")
     raise RuntimeError(f"EA API request failed after {max_attempts} attempts: {last_exc}")
 
 
@@ -227,6 +238,9 @@ async def fetch_club_info(session, platform: str, club_id: int):
         info = await fetch_json(session, "/clubs/info", {"platform": platform, "clubIds": str(club_id)})
         logger.info(f"[EA API] ✅ Successfully fetched club info for {club_id} on {platform}")
         return info, platform
+    except EAApiForbiddenError:
+        # Do not try fallback platform when blocked by WAF; that only increases blocked traffic.
+        raise
     except Exception as e:
         # Try the other generation platform
         other = "common-gen4" if platform == "common-gen5" else "common-gen5"
@@ -319,6 +333,9 @@ async def fetch_latest_match(session, platform: str, club_id: int):
                     # Other errors (network, etc.) - log and try next
                     logger.debug(f"[EA API] Error with {endpoint_path} and matchType={match_type_attempt or 'none'}: {e}, trying next option...")
                     continue
+            except EAApiForbiddenError:
+                # Hard WAF block, do not spam every endpoint/matchType combination.
+                raise
             except Exception as e:
                 # Other unexpected errors - log and try next
                 logger.debug(f"[EA API] Unexpected error with {endpoint_path} and matchType={match_type_attempt or 'none'}: {e}, trying next option...")

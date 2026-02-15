@@ -61,6 +61,7 @@ import os
 import re
 import logging
 import asyncio
+import time
 import aiohttp
 import discord
 from discord import app_commands
@@ -84,7 +85,7 @@ from achievements import (
 from playoffs import is_playoff_match, process_playoff_match
 from utils.ea_api import (
     platform_from_choice, parse_club_id_from_any, warmup_session,
-    fetch_club_info, fetch_latest_match, fetch_json, HTTP_TIMEOUT,
+    fetch_club_info, fetch_latest_match, fetch_json, HTTP_TIMEOUT, EAApiForbiddenError,
     fetch_all_matches, calculate_player_wld
 )
 from utils.embeds import build_match_embed, utc_to_str
@@ -103,6 +104,7 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = os.getenv("GUILD_ID")  # optional for fast guild sync
 
 POLL_INTERVAL_SECONDS = 60
+EA_FORBIDDEN_COOLDOWN_SECONDS = 600
 
 
 # ---------- Bot Class ----------
@@ -111,6 +113,7 @@ class ProClubsBot(discord.Client):
         intents = discord.Intents.default()
         super().__init__(intents=intents)
         self.tree = app_commands.CommandTree(self)
+        self._ea_forbidden_until: dict[int, float] = {}
 
     async def on_ready(self):
         logger.info(f"Logged in as {self.user} (id: {self.user.id})")
@@ -177,11 +180,22 @@ class ProClubsBot(discord.Client):
                 if autopost != 1:
                     logger.debug(f"Guild {guild_id} autopost is disabled (autopost={autopost}), skipping")
                     continue
+
+                blocked_until = self._ea_forbidden_until.get(int(guild_id), 0.0)
+                now_ts = time.time()
+                if blocked_until > now_ts:
+                    remaining = int(blocked_until - now_ts)
+                    logger.warning(
+                        f"[Guild {guild_id}] Skipping EA poll due to recent 403 block "
+                        f"(cooldown remaining: {remaining}s)"
+                    )
+                    continue
                 
                 try:
                     # Step 1: Fetch club info to get club name
                     logger.debug(f"[Guild {guild_id}] Fetching club info for club {club_id}...")
                     info, used_platform = await fetch_club_info(session, platform, club_id)
+                    self._ea_forbidden_until.pop(int(guild_id), None)
                     
                     # EA API returns different formats, normalize to dict
                     if isinstance(info, list):
@@ -395,6 +409,12 @@ class ProClubsBot(discord.Client):
                     except Exception as milestone_error:
                         logger.error(f"[Guild {guild_id}] Error checking milestones/achievements: {milestone_error}", exc_info=True)
                     
+                except EAApiForbiddenError as e:
+                    self._ea_forbidden_until[int(guild_id)] = time.time() + EA_FORBIDDEN_COOLDOWN_SECONDS
+                    logger.error(
+                        f"[Guild {guild_id}] EA API returned 403 ({e.path}). "
+                        f"Pausing this guild for {EA_FORBIDDEN_COOLDOWN_SECONDS}s before retry."
+                    )
                 except Exception as e:  # noqa: BLE001
                     logger.error(f"❌ [Guild {guild_id}] Error polling guild: {e}", exc_info=True)
 
