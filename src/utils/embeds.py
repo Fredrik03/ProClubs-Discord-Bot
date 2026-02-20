@@ -44,13 +44,13 @@ class PaginatedEmbedView(discord.ui.View):
 
     def _build_edit_kwargs(self) -> dict:
         """Build keyword arguments for edit_message for the current page."""
-        kwargs: dict = {"embed": self.embeds[self.current_page], "view": self, "attachments": []}
         factory = self.page_files.get(self.current_page)
+        attachments: list = []
         if factory:
             file = factory()
             if file:
-                kwargs["files"] = [file]
-        return kwargs
+                attachments = [file]
+        return {"embed": self.embeds[self.current_page], "view": self, "attachments": attachments}
 
     @discord.ui.button(label="◀ Previous", style=discord.ButtonStyle.secondary)
     async def prev_button(self, interaction: discord.Interaction, button: discord.ui.Button):
