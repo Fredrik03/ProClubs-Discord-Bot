@@ -114,6 +114,7 @@ GUILD_ID = os.getenv("GUILD_ID")  # optional for fast guild sync
 
 POLL_INTERVAL_SECONDS = 60
 EA_FORBIDDEN_COOLDOWN_SECONDS = 600
+MIN_CHART_DATA_POINTS = 2  # minimum match-history entries needed to render a chart
 
 
 # ---------- Bot Class ----------
@@ -429,6 +430,64 @@ class ProClubsBot(discord.Client):
 
 
 client = ProClubsBot()
+
+
+def _generate_player_chart(player_name: str, history: list) -> tuple | None:
+    """
+    Render a goals/assists-over-time chart for *player_name* using *history*
+    (list of dicts with "goals" and "assists" keys).
+
+    Returns a ``(discord.File, filename)`` tuple, or ``None`` when there are
+    fewer than ``MIN_CHART_DATA_POINTS`` data-points.
+    """
+    if len(history) < MIN_CHART_DATA_POINTS:
+        return None
+
+    import io
+
+    match_nums = list(range(1, len(history) + 1))
+    goals = [m["goals"] for m in history]
+    assists = [m["assists"] for m in history]
+    cum_gpg = [sum(goals[:i + 1]) / (i + 1) for i in range(len(goals))]
+    cum_apg = [sum(assists[:i + 1]) / (i + 1) for i in range(len(assists))]
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 7), sharex=True)
+    fig.patch.set_facecolor("#2f3136")
+    for ax in (ax1, ax2):
+        ax.set_facecolor("#36393f")
+        ax.tick_params(colors="white")
+        ax.spines[:].set_color("#555")
+        ax.yaxis.label.set_color("white")
+        ax.xaxis.label.set_color("white")
+        ax.title.set_color("white")
+
+    ax1.bar(match_nums, goals, color="#e74c3c", alpha=0.7, label="Goals (match)")
+    ax1.plot(match_nums, cum_gpg, color="#ff9966", linewidth=2, marker="o",
+             markersize=4, label="Goals/game (cumulative avg)")
+    ax1.set_ylabel("Goals", color="white")
+    ax1.set_title(f"Goals Over Time — {player_name}", color="white")
+    ax1.legend(facecolor="#2f3136", labelcolor="white")
+    ax1.yaxis.set_major_locator(mticker.MaxNLocator(integer=True))
+
+    ax2.bar(match_nums, assists, color="#3498db", alpha=0.7, label="Assists (match)")
+    ax2.plot(match_nums, cum_apg, color="#66ccff", linewidth=2, marker="o",
+             markersize=4, label="Assists/game (cumulative avg)")
+    ax2.set_xlabel("Match #", color="white")
+    ax2.set_ylabel("Assists", color="white")
+    ax2.set_title(f"Assists Over Time — {player_name}", color="white")
+    ax2.legend(facecolor="#2f3136", labelcolor="white")
+    ax2.yaxis.set_major_locator(mticker.MaxNLocator(integer=True))
+
+    plt.tight_layout(pad=2.0)
+
+    buf = io.BytesIO()
+    plt.savefig(buf, format="png", dpi=120, facecolor=fig.get_facecolor())
+    plt.close(fig)
+    buf.seek(0)
+
+    filename = f"{player_name}_stats.png"
+    return discord.File(buf, filename=filename), filename
+
 
 # ---------- Slash commands ----------
 
@@ -880,7 +939,7 @@ async def playerstats(interaction: discord.Interaction, player_name: str):
                 )
                 return
 
-            # Build player stats embed
+            # Build player stats embed (page 1)
             name = player.get("name", "Unknown")
             position = player.get("favoritePosition", player.get("proPos", "N/A"))
             
@@ -922,45 +981,126 @@ async def playerstats(interaction: discord.Interaction, player_name: str):
             hat_tricks = get_player_hat_trick_count(interaction.guild_id, name)
             assist_hat_tricks = get_player_assist_hat_trick_count(interaction.guild_id, name)
 
-            embed = discord.Embed(
+            stats_embed = discord.Embed(
                 title=f"⚽ {name}",
                 description=f"**{club_name}** | Position: {position}",
                 color=discord.Color.green(),
             )
 
             # Just show matches played and win rate
-            embed.add_field(name="🎮 Matches", value=str(matches_played), inline=True)
-            embed.add_field(name="📈 Win %", value=f"{win_rate}%", inline=True)
-            embed.add_field(name="⭐ Avg Rating", value=f"{rating:.1f}" if rating else "N/A", inline=True)
+            stats_embed.add_field(name="🎮 Matches", value=str(matches_played), inline=True)
+            stats_embed.add_field(name="📈 Win %", value=f"{win_rate}%", inline=True)
+            stats_embed.add_field(name="⭐ Avg Rating", value=f"{rating:.1f}" if rating else "N/A", inline=True)
             
-            embed.add_field(name="⚽ Goals", value=str(goals), inline=True)
-            embed.add_field(name="🅰️ Assists", value=str(assists), inline=True)
-            embed.add_field(name="⭐ MOTM", value=str(motm), inline=True)
+            stats_embed.add_field(name="⚽ Goals", value=str(goals), inline=True)
+            stats_embed.add_field(name="🅰️ Assists", value=str(assists), inline=True)
+            stats_embed.add_field(name="⭐ MOTM", value=str(motm), inline=True)
             
             # Hat-trick stats (only show if > 0)
             if hat_tricks > 0:
-                embed.add_field(name="🎩 Hat-tricks", value=str(hat_tricks), inline=True)
+                stats_embed.add_field(name="🎩 Hat-tricks", value=str(hat_tricks), inline=True)
             if assist_hat_tricks > 0:
-                embed.add_field(name="🎯 Assist Hat-tricks", value=str(assist_hat_tricks), inline=True)
+                stats_embed.add_field(name="🎯 Assist Hat-tricks", value=str(assist_hat_tricks), inline=True)
             
-            embed.add_field(name="📊 Goals/Game", value=f"{goals_per_game:.2f}", inline=True)
-            embed.add_field(name="📊 Assists/Game", value=f"{assists_per_game:.2f}", inline=True)
-            embed.add_field(name="🎯 Pass Accuracy", value=f"{pass_success_rate}%", inline=True)
+            stats_embed.add_field(name="📊 Goals/Game", value=f"{goals_per_game:.2f}", inline=True)
+            stats_embed.add_field(name="📊 Assists/Game", value=f"{assists_per_game:.2f}", inline=True)
+            stats_embed.add_field(name="🎯 Pass Accuracy", value=f"{pass_success_rate}%", inline=True)
             
-            embed.add_field(name="🥅 Shot Accuracy", value=f"{shot_success_rate}%", inline=True)
-            embed.add_field(name="🛡️ Tackles", value=f"{tackles_made}", inline=True)
-            embed.add_field(name="🛡️ Tackle Success", value=f"{tackle_success_rate}%", inline=True)
+            stats_embed.add_field(name="🥅 Shot Accuracy", value=f"{shot_success_rate}%", inline=True)
+            stats_embed.add_field(name="🛡️ Tackles", value=f"{tackles_made}", inline=True)
+            stats_embed.add_field(name="🛡️ Tackle Success", value=f"{tackle_success_rate}%", inline=True)
             
             if clean_sheets_def > 0 or clean_sheets_gk > 0:
                 clean_sheets = clean_sheets_gk if clean_sheets_gk > 0 else clean_sheets_def
-                embed.add_field(name="🧤 Clean Sheets", value=str(clean_sheets), inline=True)
+                stats_embed.add_field(name="🧤 Clean Sheets", value=str(clean_sheets), inline=True)
             
             if red_cards > 0:
-                embed.add_field(name="🟥 Red Cards", value=str(red_cards), inline=True)
+                stats_embed.add_field(name="🟥 Red Cards", value=str(red_cards), inline=True)
 
-            embed.set_footer(text=f"Platform: {used_platform}")
+            stats_embed.set_footer(text=f"Platform: {used_platform} | Page 1/3")
 
-            await interaction.followup.send(embed=embed)
+            # Build achievements embed (page 2)
+            from database import get_player_achievement_history
+            from achievements import ACHIEVEMENTS
+
+            achievement_history = get_player_achievement_history(interaction.guild_id, name)
+            ach_embed = discord.Embed(
+                title=f"🏆 {name}'s Achievements",
+                color=discord.Color.gold(),
+            )
+            if achievement_history:
+                ach_embed.description = (
+                    f"**{len(achievement_history)}** achievement"
+                    f"{'s' if len(achievement_history) != 1 else ''} earned"
+                )
+                categorized: dict = {}
+                for ach in achievement_history:
+                    ach_id = ach["achievement_id"]
+                    if ach_id in ACHIEVEMENTS:
+                        ach_data = ACHIEVEMENTS[ach_id]
+                        cat = ach_data["category"]
+                        categorized.setdefault(cat, []).append(ach_data)
+                for cat, achs in categorized.items():
+                    ach_embed.add_field(
+                        name=cat,
+                        value="\n".join(
+                            f"{a['emoji']} **{a['name']}** — {a['description']}"
+                            for a in achs
+                        ),
+                        inline=False,
+                    )
+            else:
+                ach_embed.description = (
+                    f"No achievements earned yet. Use `/listachievements` to see "
+                    f"what's available!"
+                )
+            ach_embed.set_footer(text=f"Platform: {used_platform} | Page 2/3")
+
+            # Build stats-over-time embed (page 3) and pre-render the chart
+            from database import get_player_match_history as _get_history
+            history = _get_history(interaction.guild_id, name, limit=20)
+            chart_result = _generate_player_chart(name, history)
+
+            if chart_result:
+                chart_file, chart_filename = chart_result
+                total_g = sum(m["goals"] for m in history)
+                total_a = sum(m["assists"] for m in history)
+                gpg = total_g / len(history)
+                apg = total_a / len(history)
+                chart_embed = discord.Embed(
+                    title=f"📈 Stats Over Time — {name}",
+                    description=(
+                        f"**{len(history)} matches tracked** | "
+                        f"⚽ {total_g} goals ({gpg:.2f}/game) | "
+                        f"🅰️ {total_a} assists ({apg:.2f}/game)"
+                    ),
+                    color=discord.Color.blurple(),
+                )
+                chart_embed.set_image(url=f"attachment://{chart_filename}")
+                chart_embed.set_footer(
+                    text="Match data tracked since the bot was set up | Page 3/3"
+                )
+            else:
+                chart_file = None
+                chart_embed = discord.Embed(
+                    title=f"📈 Stats Over Time — {name}",
+                    description=(
+                        "Not enough match history yet.\n"
+                        "The bot needs to track at least 2 matches after setup. "
+                        "Play more and the chart will appear here automatically!"
+                    ),
+                    color=discord.Color.blurple(),
+                )
+                chart_embed.set_footer(text=f"Platform: {used_platform} | Page 3/3")
+
+            pages = [stats_embed, ach_embed, chart_embed]
+            view = PaginatedEmbedView(pages)
+
+            send_kwargs: dict = {"embed": pages[0], "view": view, "wait": True}
+            if chart_file:
+                send_kwargs["file"] = chart_file
+            msg = await interaction.followup.send(**send_kwargs)
+            view.message = msg
     except Exception as e:  # noqa: BLE001
         logger.error(f"Error fetching player stats: {e}", exc_info=True)
         await interaction.followup.send(
@@ -1076,7 +1216,7 @@ async def lastmatches(interaction: discord.Interaction):
                 pages.append(embed)
             
             view = PaginatedEmbedView(pages)
-            await interaction.followup.send(embed=pages[0], view=view)
+            view.message = await interaction.followup.send(embed=pages[0], view=view, wait=True)
             
     except Exception as e:
         logger.error(f"Error fetching matches: {e}", exc_info=True)
@@ -1264,7 +1404,7 @@ async def leaderboard(interaction: discord.Interaction, category: app_commands.C
                 pages.append(embed)
 
             view = PaginatedEmbedView(pages)
-            await interaction.followup.send(embed=pages[0], view=view)
+            view.message = await interaction.followup.send(embed=pages[0], view=view, wait=True)
     except Exception as e:  # noqa: BLE001
         logger.error(f"Error fetching leaderboard: {e}", exc_info=True)
         await interaction.followup.send(
@@ -1370,7 +1510,7 @@ async def listachievements(interaction: discord.Interaction):
             pages.append(embed)
 
         view = PaginatedEmbedView(pages)
-        await interaction.followup.send(embed=pages[0], view=view)
+        view.message = await interaction.followup.send(embed=pages[0], view=view, wait=True)
         
     except Exception as e:
         logger.error(f"Error listing achievements: {e}", exc_info=True)
@@ -1544,13 +1684,12 @@ async def statsovertime(interaction: discord.Interaction, player_name: str):
         return
 
     try:
-        import io
-
         from database import get_player_match_history
 
         history = get_player_match_history(interaction.guild_id, player_name, limit=20)
 
-        if len(history) < 2:
+        chart_result = _generate_player_chart(player_name, history)
+        if not chart_result:
             await interaction.followup.send(
                 f"❌ Not enough match history for **{player_name}** yet.\n"
                 f"The bot needs to track at least 2 matches after setup. "
@@ -1559,55 +1698,11 @@ async def statsovertime(interaction: discord.Interaction, player_name: str):
             )
             return
 
-        match_nums = list(range(1, len(history) + 1))
-        goals = [m["goals"] for m in history]
-        assists = [m["assists"] for m in history]
-
-        # Compute cumulative averages (goals per game / assists per game over time)
-        cum_gpg = [sum(goals[:i+1]) / (i + 1) for i in range(len(goals))]
-        cum_apg = [sum(assists[:i+1]) / (i + 1) for i in range(len(assists))]
-
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 7), sharex=True)
-        fig.patch.set_facecolor("#2f3136")  # Discord dark background
-        for ax in (ax1, ax2):
-            ax.set_facecolor("#36393f")
-            ax.tick_params(colors="white")
-            ax.spines[:].set_color("#555")
-            ax.yaxis.label.set_color("white")
-            ax.xaxis.label.set_color("white")
-            ax.title.set_color("white")
-
-        # Top plot: per-match goals (bars) + cumulative GPG (line)
-        ax1.bar(match_nums, goals, color="#e74c3c", alpha=0.7, label="Goals (match)")
-        ax1.plot(match_nums, cum_gpg, color="#ff9966", linewidth=2, marker="o",
-                 markersize=4, label="Goals/game (cumulative avg)")
-        ax1.set_ylabel("Goals", color="white")
-        ax1.set_title(f"Goals Over Time — {player_name}", color="white")
-        ax1.legend(facecolor="#2f3136", labelcolor="white")
-        ax1.yaxis.set_major_locator(mticker.MaxNLocator(integer=True))
-
-        # Bottom plot: per-match assists (bars) + cumulative APG (line)
-        ax2.bar(match_nums, assists, color="#3498db", alpha=0.7, label="Assists (match)")
-        ax2.plot(match_nums, cum_apg, color="#66ccff", linewidth=2, marker="o",
-                 markersize=4, label="Assists/game (cumulative avg)")
-        ax2.set_xlabel("Match #", color="white")
-        ax2.set_ylabel("Assists", color="white")
-        ax2.set_title(f"Assists Over Time — {player_name}", color="white")
-        ax2.legend(facecolor="#2f3136", labelcolor="white")
-        ax2.yaxis.set_major_locator(mticker.MaxNLocator(integer=True))
-
-        plt.tight_layout(pad=2.0)
-
-        buf = io.BytesIO()
-        plt.savefig(buf, format="png", dpi=120, facecolor=fig.get_facecolor())
-        plt.close(fig)
-        buf.seek(0)
-
-        file = discord.File(buf, filename=f"{player_name}_stats.png")
-        total_goals = sum(goals)
-        total_assists = sum(assists)
-        final_gpg = cum_gpg[-1]
-        final_apg = cum_apg[-1]
+        chart_file, chart_filename = chart_result
+        total_goals = sum(m["goals"] for m in history)
+        total_assists = sum(m["assists"] for m in history)
+        final_gpg = total_goals / len(history)
+        final_apg = total_assists / len(history)
 
         embed = discord.Embed(
             title=f"📈 Stats Over Time — {player_name}",
@@ -1618,9 +1713,9 @@ async def statsovertime(interaction: discord.Interaction, player_name: str):
             ),
             color=discord.Color.blurple(),
         )
-        embed.set_image(url=f"attachment://{player_name}_stats.png")
+        embed.set_image(url=f"attachment://{chart_filename}")
         embed.set_footer(text="Match data tracked since the bot was set up for this server.")
-        await interaction.followup.send(embed=embed, file=file)
+        await interaction.followup.send(embed=embed, file=chart_file)
 
     except Exception as e:
         logger.error(f"Error generating stats over time chart: {e}", exc_info=True)

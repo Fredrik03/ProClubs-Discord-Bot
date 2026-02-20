@@ -14,7 +14,10 @@ class PaginatedEmbedView(discord.ui.View):
 
         pages = [embed1, embed2, embed3]
         view = PaginatedEmbedView(pages)
-        await interaction.followup.send(embed=pages[0], view=view)
+        # ``wait=True`` returns the sent Message object so the view can
+        # edit it on timeout to visually disable the buttons.
+        msg = await interaction.followup.send(embed=pages[0], view=view, wait=True)
+        view.message = msg
     """
 
     def __init__(self, embeds: list[discord.Embed], *, timeout: float = 180.0):
@@ -23,6 +26,7 @@ class PaginatedEmbedView(discord.ui.View):
             raise ValueError("embeds must not be empty")
         self.embeds = embeds
         self.current_page = 0
+        self.message: discord.Message | None = None
         self._update_buttons()
 
     def _update_buttons(self) -> None:
@@ -50,6 +54,14 @@ class PaginatedEmbedView(discord.ui.View):
         """Disable all buttons when the view times out (3 minutes by default)."""
         for child in self.children:
             child.disabled = True
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException) as exc:
+                import logging
+                logging.getLogger("ProClubsBot").warning(
+                    "PaginatedEmbedView.on_timeout: could not edit message to disable buttons: %s", exc
+                )
 
 
 def utc_to_str(ts: int) -> str:
