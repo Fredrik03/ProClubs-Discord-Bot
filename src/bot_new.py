@@ -90,7 +90,7 @@ from utils.ea_api import (
     fetch_club_info, fetch_latest_match, fetch_json, HTTP_TIMEOUT, EAApiForbiddenError,
     fetch_all_matches, calculate_player_wld
 )
-from utils.embeds import build_match_embed, utc_to_str
+from utils.embeds import build_match_embed, utc_to_str, PaginatedEmbedView
 
 # Set Matplotlib backend before any pyplot import so it works correctly
 # in a headless server environment and across repeated command invocations.
@@ -968,9 +968,9 @@ async def playerstats(interaction: discord.Interaction, player_name: str):
         )
 
 
-@client.tree.command(name="lastmatches", description="Show the last 5 matches played by the club")
+@client.tree.command(name="lastmatches", description="Show the last 10 matches played by the club")
 async def lastmatches(interaction: discord.Interaction):
-    """Display recent match history."""
+    """Display recent match history, paginated (one match per page)."""
     await interaction.response.defer(thinking=True)
     st = get_settings(interaction.guild_id)
     if not st or not (st.get("club_id") and st.get("platform")):
@@ -992,84 +992,91 @@ async def lastmatches(interaction: discord.Interaction):
                 club_info = {}
             club_name = club_info.get("name", "Unknown Club")
             
-            # Fetch last 5 matches
-            matches = await fetch_all_matches(session, used_platform, club_id, max_count=5)
+            # Fetch last 10 matches
+            matches = await fetch_all_matches(session, used_platform, club_id, max_count=10)
             
             if not matches:
                 await interaction.followup.send("No recent matches found.", ephemeral=True)
                 return
             
-            embed = discord.Embed(
-                title=f"📋 Recent Matches - {club_name}",
-                description=f"Last {len(matches)} league matches",
-                color=discord.Color.blue(),
-            )
-            
+            # Build one page per match with full player breakdown
+            pages = []
             for i, match in enumerate(matches, 1):
-                # Get our club's data
                 clubs = match.get("clubs", {})
                 our_club = clubs.get(str(club_id), {})
-                
-                # Find opponent
+
                 opponent_id = [cid for cid in clubs.keys() if str(cid) != str(club_id)]
                 opponent_club = clubs.get(opponent_id[0], {}) if opponent_id else {}
                 opponent_name = opponent_club.get("details", {}).get("name", "Unknown")
-                
-                # Scores
+
                 our_score = our_club.get("score", "?")
                 opp_score = opponent_club.get("score", "?")
-                
-                # Result
+
                 result = our_club.get("result", "")
                 if result == "1":
                     result_emoji = "✅ Win"
-                    result_color = "🟢"
+                    color = 0x2ecc71
                 elif result == "2":
                     result_emoji = "❌ Loss"
-                    result_color = "🔴"
+                    color = 0xe74c3c
                 elif result == "3":
                     result_emoji = "🤝 Draw"
-                    result_color = "🟡"
+                    color = 0xf1c40f
                 else:
                     result_emoji = "❓"
-                    result_color = "⚪"
-                
-                # Timestamp
-                timestamp = match.get("timestamp", 0)
+                    color = 0x95a5a6
+
                 time_ago = match.get("timeAgo", {})
-                time_str = f"{time_ago.get('number', '?')} {time_ago.get('unit', 'ago')}" if time_ago else "?"
-                
-                # Find highest rated player (MOTM or highest rating)
-                # Players are at top level: match.players[clubId][playerId]
+                time_str = (
+                    f"{time_ago.get('number', '?')} {time_ago.get('unit', 'ago')}"
+                    if time_ago else "?"
+                )
+
+                embed = discord.Embed(
+                    title=f"Match {i}/{len(matches)} — {result_emoji} {our_score}–{opp_score}",
+                    description=f"**{club_name}** vs **{opponent_name}** | {time_str} ago",
+                    color=color,
+                )
+
+                # Player stats for this match
                 all_players = match.get("players", {})
                 club_players = all_players.get(str(club_id), {})
-                best_player = None
-                best_rating = 0.0
-                
+                player_stats = []
                 for player_id, player_data in club_players.items():
                     if isinstance(player_data, dict):
-                        rating = float(player_data.get("rating", 0) or 0)
-                        # Check if MOTM
-                        if int(player_data.get("mom", 0) or 0) == 1:
-                            best_player = player_data.get("playername", "Unknown")
-                            best_rating = rating
-                            break  # MOTM is always best
-                        elif rating > best_rating:
-                            best_rating = rating
-                            best_player = player_data.get("playername", "Unknown")
-                
-                match_info = f"{result_emoji}: **{our_score}-{opp_score}** vs {opponent_name}"
-                if best_player:
-                    match_info += f"\n⭐ **{best_player}** ({best_rating:.1f} rating)"
-                
-                embed.add_field(
-                    name=f"{result_color} Match {i} - {time_str} ago",
-                    value=match_info,
-                    inline=False
-                )
+                        player_stats.append({
+                            "name": player_data.get("playername", "Unknown"),
+                            "goals": int(player_data.get("goals", 0) or 0),
+                            "assists": int(player_data.get("assists", 0) or 0),
+                            "rating": float(player_data.get("rating", 0) or 0),
+                            "mom": int(player_data.get("mom", 0) or 0),
+                        })
+
+                # Sort by rating descending
+                player_stats.sort(key=lambda p: p["rating"], reverse=True)
+
+                if player_stats:
+                    lines = []
+                    for p in player_stats:
+                        motm_tag = " 🏅" if p["mom"] == 1 else ""
+                        g = f"⚽{p['goals']}" if p["goals"] > 0 else ""
+                        a = f"🅰️{p['assists']}" if p["assists"] > 0 else ""
+                        extras = " ".join(filter(None, [g, a]))
+                        line = f"**{p['name']}** — ⭐{p['rating']:.1f}{motm_tag}"
+                        if extras:
+                            line += f"  {extras}"
+                        lines.append(line)
+                    embed.add_field(
+                        name="👥 Player Ratings",
+                        value="\n".join(lines),
+                        inline=False,
+                    )
+
+                embed.set_footer(text=f"Platform: {used_platform} | Page {i}/{len(matches)}")
+                pages.append(embed)
             
-            embed.set_footer(text=f"Platform: {used_platform}")
-            await interaction.followup.send(embed=embed)
+            view = PaginatedEmbedView(pages)
+            await interaction.followup.send(embed=pages[0], view=view)
             
     except Exception as e:
         logger.error(f"Error fetching matches: {e}", exc_info=True)
@@ -1223,28 +1230,41 @@ async def leaderboard(interaction: discord.Interaction, category: app_commands.C
                 title = "Leaderboard"
                 format_fn = lambda m: ""
 
-            # Build leaderboard embed
-            embed = discord.Embed(
-                title=f"{title}",
-                description=f"**{club_name}**",
-                color=discord.Color.gold(),
-            )
-
-            # Show top 10
+            # Build paginated leaderboard (10 players per page)
             medals = ["🥇", "🥈", "🥉"]
-            for i, m in enumerate(sorted_members[:10]):
-                rank = medals[i] if i < 3 else f"{i + 1}."
-                name = m.get("name", "Unknown")
-                stat_text = format_fn(m)
-                embed.add_field(
-                    name=f"{rank} {name}",
-                    value=stat_text,
-                    inline=False
+            page_size = 10
+            total_players = len(sorted_members)
+            total_pages = max(1, (total_players + page_size - 1) // page_size)
+
+            pages = []
+            for page_num in range(total_pages):
+                start = page_num * page_size
+                page_members = sorted_members[start:start + page_size]
+
+                embed = discord.Embed(
+                    title=f"{title}",
+                    description=f"**{club_name}**",
+                    color=discord.Color.gold(),
                 )
 
-            embed.set_footer(text=f"Platform: {used_platform} | Showing top {min(10, len(sorted_members))} of {len(sorted_members)} players")
+                for i, m in enumerate(page_members):
+                    global_rank = start + i
+                    rank = medals[global_rank] if global_rank < 3 else f"{global_rank + 1}."
+                    name = m.get("name", "Unknown")
+                    stat_text = format_fn(m)
+                    embed.add_field(
+                        name=f"{rank} {name}",
+                        value=stat_text,
+                        inline=False
+                    )
 
-            await interaction.followup.send(embed=embed)
+                embed.set_footer(
+                    text=f"Platform: {used_platform} | Page {page_num + 1}/{total_pages} | {total_players} players"
+                )
+                pages.append(embed)
+
+            view = PaginatedEmbedView(pages)
+            await interaction.followup.send(embed=pages[0], view=view)
     except Exception as e:  # noqa: BLE001
         logger.error(f"Error fetching leaderboard: {e}", exc_info=True)
         await interaction.followup.send(
@@ -1321,7 +1341,7 @@ async def achievements_cmd(interaction: discord.Interaction, player_name: str):
 
 @client.tree.command(name="listachievements", description="List all available achievements")
 async def listachievements(interaction: discord.Interaction):
-    """Display all available achievements that can be earned."""
+    """Display all available achievements that can be earned, paginated by category."""
     await interaction.response.defer(thinking=True)
     logger.info(f"[Command: listachievements] User {interaction.user} requesting achievement list")
     
@@ -1329,25 +1349,28 @@ async def listachievements(interaction: discord.Interaction):
         from achievements import get_all_achievements_list
         
         categorized = get_all_achievements_list()
-        
-        embed = discord.Embed(
-            title="🏆 All Available Achievements",
-            description=f"Earn these special achievements through exceptional performance!",
-            color=discord.Color.gold(),
-        )
-        
-        # Add fields for each category
-        for category, achievements_list in categorized.items():
+        total_count = sum(len(achs) for achs in categorized.values())
+        categories = list(categorized.items())
+
+        # Build one embed per category so each page stays focused
+        pages = []
+        for page_num, (category, achievements_list) in enumerate(categories, 1):
             ach_text = "\n".join([
-                f"{ach['emoji']} **{ach['name']}** - {ach['description']}"
+                f"{ach['emoji']} **{ach['name']}** — {ach['description']}"
                 for ach in achievements_list
             ])
-            embed.add_field(name=category, value=ach_text, inline=False)
-        
-        total_count = sum(len(achievements_list) for achievements_list in categorized.values())
-        embed.set_footer(text=f"Total: {total_count} achievements available")
-        
-        await interaction.followup.send(embed=embed)
+            embed = discord.Embed(
+                title=f"🏆 Achievements — {category}",
+                description=ach_text,
+                color=discord.Color.gold(),
+            )
+            embed.set_footer(
+                text=f"Page {page_num}/{len(categories)} | {total_count} achievements total"
+            )
+            pages.append(embed)
+
+        view = PaginatedEmbedView(pages)
+        await interaction.followup.send(embed=pages[0], view=view)
         
     except Exception as e:
         logger.error(f"Error listing achievements: {e}", exc_info=True)

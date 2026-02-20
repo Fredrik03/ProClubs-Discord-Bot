@@ -5,6 +5,53 @@ import discord
 from datetime import datetime, timezone
 
 
+class PaginatedEmbedView(discord.ui.View):
+    """
+    A Discord View that adds Previous / Next buttons to navigate
+    through a list of pre-built embeds.
+
+    Usage::
+
+        pages = [embed1, embed2, embed3]
+        view = PaginatedEmbedView(pages)
+        await interaction.followup.send(embed=pages[0], view=view)
+    """
+
+    def __init__(self, embeds: list[discord.Embed], *, timeout: float = 180.0):
+        super().__init__(timeout=timeout)
+        if not embeds:
+            raise ValueError("embeds must not be empty")
+        self.embeds = embeds
+        self.current_page = 0
+        self._update_buttons()
+
+    def _update_buttons(self) -> None:
+        """Disable navigation buttons at the first / last page."""
+        self.prev_button.disabled = self.current_page == 0
+        self.next_button.disabled = self.current_page == len(self.embeds) - 1
+
+    @discord.ui.button(label="◀ Previous", style=discord.ButtonStyle.secondary)
+    async def prev_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_page -= 1
+        self._update_buttons()
+        await interaction.response.edit_message(
+            embed=self.embeds[self.current_page], view=self
+        )
+
+    @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.secondary)
+    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_page += 1
+        self._update_buttons()
+        await interaction.response.edit_message(
+            embed=self.embeds[self.current_page], view=self
+        )
+
+    async def on_timeout(self) -> None:
+        """Disable all buttons when the view times out (3 minutes by default)."""
+        for child in self.children:
+            child.disabled = True
+
+
 def utc_to_str(ts: int) -> str:
     """Convert UTC timestamp to readable string."""
     try:
