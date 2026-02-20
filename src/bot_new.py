@@ -59,6 +59,7 @@ All operations are logged with descriptive prefixes:
 
 Use these prefixes to quickly identify issues in the console logs.
 """
+import io
 import os
 import re
 import logging
@@ -1061,8 +1062,19 @@ async def playerstats(interaction: discord.Interaction, player_name: str):
             history = _get_history(interaction.guild_id, name, limit=20)
             chart_result = _generate_player_chart(name, history)
 
+            chart_page_files: dict = {}
             if chart_result:
                 chart_file, chart_filename = chart_result
+                # Read bytes so the file can be recreated on demand (e.g. when
+                # the user navigates to the graph page after viewing other pages).
+                chart_file.fp.seek(0)
+                chart_raw_bytes = chart_file.fp.read()
+
+                def _make_chart_file(raw=chart_raw_bytes, fname=chart_filename):
+                    return discord.File(io.BytesIO(raw), filename=fname)
+
+                chart_page_files = {2: _make_chart_file}
+
                 total_g = sum(m["goals"] for m in history)
                 total_a = sum(m["assists"] for m in history)
                 gpg = total_g / len(history)
@@ -1081,7 +1093,6 @@ async def playerstats(interaction: discord.Interaction, player_name: str):
                     text="Match data tracked since the bot was set up | Page 3/3"
                 )
             else:
-                chart_file = None
                 chart_embed = discord.Embed(
                     title=f"📈 Stats Over Time — {name}",
                     description=(
@@ -1094,12 +1105,9 @@ async def playerstats(interaction: discord.Interaction, player_name: str):
                 chart_embed.set_footer(text=f"Platform: {used_platform} | Page 3/3")
 
             pages = [stats_embed, ach_embed, chart_embed]
-            view = PaginatedEmbedView(pages)
+            view = PaginatedEmbedView(pages, page_files=chart_page_files)
 
-            send_kwargs: dict = {"embed": pages[0], "view": view, "wait": True}
-            if chart_file:
-                send_kwargs["file"] = chart_file
-            msg = await interaction.followup.send(**send_kwargs)
+            msg = await interaction.followup.send(embed=pages[0], view=view, wait=True)
             view.message = msg
     except Exception as e:  # noqa: BLE001
         logger.error(f"Error fetching player stats: {e}", exc_info=True)
