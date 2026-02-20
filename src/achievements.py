@@ -11,7 +11,7 @@ ACHIEVEMENT CATEGORIES:
 3. Streak & Consistency: Consecutive match achievements
 4. Team Performance: Team-based achievements
 
-Total: 14 unique achievements available.
+Total: 19 unique achievements available.
 Each achievement is only announced once per player.
 """
 import logging
@@ -118,6 +118,40 @@ ACHIEVEMENTS = {
         "description": "Beat a team with 500+ skill rating difference",
         "category": "Team Performance"
     },
+
+    # Match Performance (additional)
+    "double_trouble": {
+        "name": "Double Trouble",
+        "emoji": "🎯",
+        "description": "Score 2+ goals AND 2+ assists in a single match",
+        "category": "Match Performance"
+    },
+    "sniper": {
+        "name": "Sniper",
+        "emoji": "🏹",
+        "description": "Score 5+ goals in a single match",
+        "category": "Match Performance"
+    },
+    "unsung_hero": {
+        "name": "Unsung Hero",
+        "emoji": "🦸",
+        "description": "Win Man of the Match without scoring or assisting",
+        "category": "Match Performance"
+    },
+
+    # Career Milestones
+    "iron_man": {
+        "name": "Iron Man",
+        "emoji": "🦾",
+        "description": "Play 50+ matches",
+        "category": "Career Milestones"
+    },
+    "consistent_performer": {
+        "name": "Consistent Performer",
+        "emoji": "📈",
+        "description": "Maintain 7.5+ average rating over 20+ matches",
+        "category": "Career Milestones"
+    },
 }
 
 
@@ -141,6 +175,7 @@ def check_achievements(guild_id: int, player_name: str, stats: dict, match_data:
     goals = int(stats.get("goals", 0) or 0)
     assists = int(stats.get("assists", 0) or 0)
     motm = int(stats.get("manOfTheMatch", 0) or 0)
+    rating = float(stats.get("ratingAve", 0) or 0)
     shot_accuracy = int(stats.get("shotSuccessRate", 0) or 0)
     pass_accuracy = int(stats.get("passSuccessRate", 0) or 0)
     tackle_success = int(stats.get("tackleSuccessRate", 0) or 0)
@@ -190,6 +225,20 @@ def check_achievements(guild_id: int, player_name: str, stats: dict, match_data:
             achievements.append({
                 "id": "the_wall",
                 **ACHIEVEMENTS["the_wall"]
+            })
+    
+    # Career Milestone Achievements
+    if matches_played >= 50 and not has_achievement_been_earned(guild_id, player_name, "iron_man"):
+        achievements.append({
+            "id": "iron_man",
+            **ACHIEVEMENTS["iron_man"]
+        })
+    
+    if matches_played >= 20 and rating >= 7.5:
+        if not has_achievement_been_earned(guild_id, player_name, "consistent_performer"):
+            achievements.append({
+                "id": "consistent_performer",
+                **ACHIEVEMENTS["consistent_performer"]
             })
     
     # Match-specific achievements (if match data provided)
@@ -249,6 +298,27 @@ def check_match_achievements(guild_id: int, player_name: str, match_data: dict) 
         achievements.append({
             "id": "perfect_10",
             **ACHIEVEMENTS["perfect_10"]
+        })
+    
+    # Sniper - 5+ goals in a single match
+    if match_goals >= 5 and not has_achievement_been_earned(guild_id, player_name, "sniper"):
+        achievements.append({
+            "id": "sniper",
+            **ACHIEVEMENTS["sniper"]
+        })
+    
+    # Double Trouble - 2+ goals AND 2+ assists in a single match
+    if match_goals >= 2 and match_assists >= 2 and not has_achievement_been_earned(guild_id, player_name, "double_trouble"):
+        achievements.append({
+            "id": "double_trouble",
+            **ACHIEVEMENTS["double_trouble"]
+        })
+    
+    # Unsung Hero - Win MOTM without scoring or assisting
+    if is_motm and match_goals == 0 and match_assists == 0 and not has_achievement_been_earned(guild_id, player_name, "unsung_hero"):
+        achievements.append({
+            "id": "unsung_hero",
+            **ACHIEVEMENTS["unsung_hero"]
         })
     
     # Team Performance Achievements
@@ -394,6 +464,8 @@ def check_historical_achievements(guild_id: int, player_name: str, stats: dict) 
     - Goal Machine (2+ goals per game)
     - Midfield Maestro (90%+ pass accuracy)
     - The Wall (80%+ tackle success)
+    - Iron Man (50+ matches)
+    - Consistent Performer (7.5+ avg rating over 20+ matches)
     
     Skips match-specific achievements (hat tricks, perfect 10s, etc.) and
     streak achievements (on fire, clean sheets, etc.) since we don't have
@@ -469,6 +541,22 @@ def check_historical_achievements(guild_id: int, player_name: str, stats: dict) 
                 **ACHIEVEMENTS["the_wall"]
             })
             record_achievement(guild_id, player_name, "the_wall")
+    
+    # Career Milestone Achievements
+    if matches_played >= 50 and not has_achievement_been_earned(guild_id, player_name, "iron_man"):
+        achievements.append({
+            "id": "iron_man",
+            **ACHIEVEMENTS["iron_man"]
+        })
+        record_achievement(guild_id, player_name, "iron_man")
+    
+    rating = float(stats.get("ratingAve", 0) or 0)
+    if matches_played >= 20 and rating >= 7.5 and not has_achievement_been_earned(guild_id, player_name, "consistent_performer"):
+        achievements.append({
+            "id": "consistent_performer",
+            **ACHIEVEMENTS["consistent_performer"]
+        })
+        record_achievement(guild_id, player_name, "consistent_performer")
     
     return achievements
 
