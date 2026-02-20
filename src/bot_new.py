@@ -92,6 +92,13 @@ from utils.ea_api import (
 )
 from utils.embeds import build_match_embed, utc_to_str
 
+# Set Matplotlib backend before any pyplot import so it works correctly
+# in a headless server environment and across repeated command invocations.
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
+
 # ---------- logging ----------
 logging.basicConfig(
     level=logging.INFO,
@@ -1515,10 +1522,6 @@ async def statsovertime(interaction: discord.Interaction, player_name: str):
 
     try:
         import io
-        import matplotlib
-        matplotlib.use("Agg")  # Non-interactive backend (no display needed)
-        import matplotlib.pyplot as plt
-        import matplotlib.ticker as mticker
 
         from database import get_player_match_history
 

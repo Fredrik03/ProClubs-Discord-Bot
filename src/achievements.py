@@ -10,6 +10,7 @@ ACHIEVEMENT CATEGORIES:
 2. Statistical Excellence: Long-term statistical achievements
 3. Streak & Consistency: Consecutive match achievements
 4. Team Performance: Team-based achievements
+5. Career Milestones: Long-term career accomplishments
 
 Total: 19 unique achievements available.
 Each achievement is only announced once per player.
@@ -122,7 +123,7 @@ ACHIEVEMENTS = {
     # Match Performance (additional)
     "double_trouble": {
         "name": "Double Trouble",
-        "emoji": "🎯",
+        "emoji": "💫",
         "description": "Score 2+ goals AND 2+ assists in a single match",
         "category": "Match Performance"
     },
