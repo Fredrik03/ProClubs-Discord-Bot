@@ -1109,7 +1109,15 @@ async def playerstats(interaction: discord.Interaction, player_name: str):
 
 
 @client.tree.command(name="lastmatches", description="Show the last 10 matches played by the club")
-async def lastmatches(interaction: discord.Interaction):
+@app_commands.describe(match_type="Which type of matches to show (default: League)")
+@app_commands.choices(
+    match_type=[
+        app_commands.Choice(name="League 🏟️", value="leagueMatch"),
+        app_commands.Choice(name="Playoff 🏆", value="playoffMatch"),
+        app_commands.Choice(name="All match types 🔀", value="all"),
+    ]
+)
+async def lastmatches(interaction: discord.Interaction, match_type: app_commands.Choice[str] = None):
     """Display recent match history, paginated (one match per page)."""
     await interaction.response.defer(thinking=True)
     st = get_settings(interaction.guild_id)
@@ -1119,6 +1127,14 @@ async def lastmatches(interaction: discord.Interaction):
 
     club_id = int(st["club_id"])
     platform = st["platform"]
+
+    # Resolve the EA API match-type string and a human-readable label
+    if not match_type or match_type.value == "all":
+        ea_match_type = None
+        type_label = "All match types"
+    else:
+        ea_match_type = match_type.value
+        type_label = match_type.name
 
     try:
         async with aiohttp.ClientSession(timeout=HTTP_TIMEOUT) as session:
@@ -1132,11 +1148,15 @@ async def lastmatches(interaction: discord.Interaction):
                 club_info = {}
             club_name = club_info.get("name", "Unknown Club")
             
-            # Fetch last 10 matches
-            matches = await fetch_all_matches(session, used_platform, club_id, max_count=10)
+            # Fetch last 10 matches of the requested type
+            matches = await fetch_all_matches(
+                session, used_platform, club_id, max_count=10, match_type=ea_match_type
+            )
             
             if not matches:
-                await interaction.followup.send("No recent matches found.", ephemeral=True)
+                await interaction.followup.send(
+                    f"No recent **{type_label}** matches found.", ephemeral=True
+                )
                 return
             
             # Build one page per match with full player breakdown
@@ -1212,7 +1232,9 @@ async def lastmatches(interaction: discord.Interaction):
                         inline=False,
                     )
 
-                embed.set_footer(text=f"Platform: {used_platform} | Page {i}/{len(matches)}")
+                embed.set_footer(
+                    text=f"Platform: {used_platform} | {type_label} | Page {i}/{len(matches)}"
+                )
                 pages.append(embed)
             
             view = PaginatedEmbedView(pages)
@@ -1520,9 +1542,19 @@ async def listachievements(interaction: discord.Interaction):
 
 
 @client.tree.command(name="lastperformance", description="Show a player's performance over their last 10 matches")
-@app_commands.describe(player_name="The name of the player to look up")
+@app_commands.describe(
+    player_name="The name of the player to look up",
+    match_type="Which type of matches to show (default: League)",
+)
+@app_commands.choices(
+    match_type=[
+        app_commands.Choice(name="League 🏟️", value="leagueMatch"),
+        app_commands.Choice(name="Playoff 🏆", value="playoffMatch"),
+        app_commands.Choice(name="All match types 🔀", value="all"),
+    ]
+)
 @app_commands.autocomplete(player_name=player_name_autocomplete)
-async def lastperformance(interaction: discord.Interaction, player_name: str):
+async def lastperformance(interaction: discord.Interaction, player_name: str, match_type: app_commands.Choice[str] = None):
     """
     Command: /lastperformance
     Shows detailed per-match stats for a player's last 10 matches fetched from the EA API.
@@ -1538,6 +1570,14 @@ async def lastperformance(interaction: discord.Interaction, player_name: str):
 
     club_id = int(st["club_id"])
     platform = st["platform"]
+
+    # Resolve the EA API match-type string and a human-readable label
+    if not match_type or match_type.value == "all":
+        ea_match_type = None
+        type_label = "All match types"
+    else:
+        ea_match_type = match_type.value
+        type_label = match_type.name
 
     try:
         async with aiohttp.ClientSession(timeout=HTTP_TIMEOUT) as session:
@@ -1555,10 +1595,14 @@ async def lastperformance(interaction: discord.Interaction, player_name: str):
                 club_info = {}
             club_name = club_info.get("name", "Unknown Club")
 
-            matches = await fetch_all_matches(session, used_platform, club_id, max_count=10)
+            matches = await fetch_all_matches(
+                session, used_platform, club_id, max_count=10, match_type=ea_match_type
+            )
 
             if not matches:
-                await interaction.followup.send("No recent matches found.", ephemeral=True)
+                await interaction.followup.send(
+                    f"No recent **{type_label}** matches found.", ephemeral=True
+                )
                 return
 
             # Collect per-match stats for the requested player
@@ -1614,7 +1658,7 @@ async def lastperformance(interaction: discord.Interaction, player_name: str):
 
             if not player_match_rows:
                 await interaction.followup.send(
-                    f"❌ **{player_name}** didn't appear in the last {len(matches)} matches.\n"
+                    f"❌ **{player_name}** didn't appear in the last {len(matches)} **{type_label}** matches.\n"
                     f"Make sure the name is correct or try `/clubstats` first to refresh the player cache.",
                     ephemeral=True
                 )
@@ -1631,7 +1675,7 @@ async def lastperformance(interaction: discord.Interaction, player_name: str):
 
             embed = discord.Embed(
                 title=f"📊 {player_name} — Last {len(player_match_rows)} Matches",
-                description=f"**{club_name}** | Summary: {wins}W {losses}L {draws}D",
+                description=f"**{club_name}** | {type_label} | Summary: {wins}W {losses}L {draws}D",
                 color=discord.Color.green(),
             )
 
@@ -1656,7 +1700,7 @@ async def lastperformance(interaction: discord.Interaction, player_name: str):
                 value="\n".join(lines),
                 inline=False,
             )
-            embed.set_footer(text=f"Platform: {used_platform}")
+            embed.set_footer(text=f"Platform: {used_platform} | {type_label}")
             await interaction.followup.send(embed=embed)
 
     except Exception as e:
