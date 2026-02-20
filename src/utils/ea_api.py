@@ -543,35 +543,55 @@ async def fetch_all_matches(session, platform: str, club_id: int, max_count: int
     """
     Get matches from the club's match history.
     Returns list of match dicts or empty list
-    
+
     Args:
         session: aiohttp ClientSession
         platform: Platform string (e.g., "common-gen5" or "common-gen4")
         club_id: Numeric club ID
         max_count: Maximum number of matches to fetch
-        match_type: Optional match type filter (e.g., "leagueMatch", "playoffMatch")
+        match_type: Optional match type filter (e.g., "leagueMatch", "playoffMatch").
+                    When None, multiple match types are tried automatically.
     """
-    # Use the working endpoint - fetch all match types by default
-    params = {
-        "platform": platform,
-        "clubIds": str(club_id),
-        "maxResultCount": str(max_count)
-    }
-    
-    # Add match type filter if specified
+    endpoint_attempts = [
+        "/clubs/matches",
+        "/matches",
+    ]
+
+    # If a specific match type is requested, only try that one; otherwise try known types
     if match_type:
-        params["matchType"] = match_type
-    
-    try:
-        payload = await fetch_json(session, "/clubs/matches", params)
-        matches = payload if isinstance(payload, list) else payload.get("matches", [])
-        if matches:
-            match_type_str = match_type if match_type else "all types"
-            logger.info(f"Found {len(matches)} matches for club {club_id} (type: {match_type_str})")
-            return matches
-    except Exception as e:
-        logger.warning(f"Failed fetching matches: {e}")
-    
+        match_type_attempts = [match_type]
+    else:
+        match_type_attempts = [
+            "leagueMatch",
+            "gameType11",
+            None,
+            "playoffMatch",
+        ]
+
+    for endpoint_path in endpoint_attempts:
+        for mt in match_type_attempts:
+            params = {
+                "platform": platform,
+                "clubIds": str(club_id),
+                "maxResultCount": str(max_count),
+            }
+            if mt:
+                params["matchType"] = mt
+
+            try:
+                logger.debug(f"[EA API] fetch_all_matches: trying {endpoint_path} matchType={mt or 'none'}")
+                payload = await fetch_json(session, endpoint_path, params)
+                matches = payload if isinstance(payload, list) else payload.get("matches", [])
+                if matches:
+                    logger.info(f"Found {len(matches)} matches for club {club_id} (endpoint={endpoint_path}, type={mt or 'none'})")
+                    return matches
+                logger.debug(f"[EA API] fetch_all_matches: no matches returned for {endpoint_path} matchType={mt or 'none'}")
+            except EAApiForbiddenError:
+                raise
+            except Exception as e:
+                logger.warning(f"[EA API] fetch_all_matches: failed for {endpoint_path} matchType={mt or 'none'}: {e}")
+
+    logger.error(f"[EA API] ❌ fetch_all_matches: all attempts exhausted for club {club_id}")
     return []
 
 
