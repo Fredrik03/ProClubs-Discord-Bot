@@ -40,6 +40,8 @@ KEY COMPONENTS:
    - /setmatchchannel: Set where matches are posted
    - /setmilestonechannel: Set where milestones are announced
    - /setachievementchannel: Set where achievements are announced
+   - /setmonthlychannel: Set where Player of the Month announcements go
+   - /potm: View current Player of the Month standings
    - /clubstats: View overall club statistics
    - /playerstats: View individual player stats
    - /lastmatches: View recent match history
@@ -78,7 +80,8 @@ from database import (
     get_all_guild_settings, cache_club_members, get_cached_club_members,
     update_player_match_history, is_player_initialized, mark_player_initialized,
     get_player_hat_trick_count, get_player_assist_hat_trick_count,
-    get_all_players_hat_trick_stats
+    get_all_players_hat_trick_stats, set_last_playoff_match_id,
+    get_monthly_stats
 )
 from milestones import check_milestones, announce_milestones
 from achievements import (
@@ -86,9 +89,13 @@ from achievements import (
     check_historical_achievements, announce_historical_achievements
 )
 from playoffs import is_playoff_match, process_playoff_match
+from monthly import (
+    process_league_match_monthly, check_month_rollover, detect_month_period
+)
 from utils.ea_api import (
     platform_from_choice, parse_club_id_from_any, warmup_session,
-    fetch_club_info, fetch_latest_match, fetch_json, HTTP_TIMEOUT, EAApiForbiddenError,
+    fetch_club_info, fetch_latest_match, fetch_latest_playoff_match,
+    fetch_json, HTTP_TIMEOUT, EAApiForbiddenError,
     fetch_all_matches, calculate_player_wld
 )
 from utils.embeds import build_match_embed, utc_to_str, PaginatedEmbedView
@@ -332,10 +339,9 @@ class ProClubsBot(discord.Client):
                         logger.error(f"[Guild {guild_id}] Failed to update last_match_id in database: {db_error}", exc_info=True)
                         # Don't continue here - match was posted, just DB update failed
                     
-                    # Step 7.5: Check if this is a playoff match and process accordingly
-                    if is_playoff_match(mt):
-                        logger.info(f"[Guild {guild_id}] Playoff match detected: {match_id}")
-                        await process_playoff_match(self, guild_id, match, mt, club_id)
+                    # Track monthly stats for league matches (not playoffs)
+                    if not is_playoff_match(mt):
+                        process_league_match_monthly(guild_id, match, club_id)
                     
                     # Step 8: Check for milestones and achievements
                     logger.debug(f"[Guild {guild_id}] Checking for player milestones and achievements...")
@@ -391,6 +397,18 @@ class ProClubsBot(discord.Client):
                             # Find player's match stats
                             players = match.get("players", {})
                             club_players = players.get(str(club_id), {})
+
+                            # Determine match result for team-streak tracking
+                            result_code = our_club.get("result", "")
+                            if result_code == "1":
+                                match_result = "W"
+                            elif result_code == "2":
+                                match_result = "L"
+                            elif result_code == "3":
+                                match_result = "D"
+                            else:
+                                match_result = "L"
+
                             for pid, pdata in club_players.items():
                                 if isinstance(pdata, dict) and pdata.get("playername", "").lower() == player_name.lower():
                                     match_goals = int(pdata.get("goals", 0) or 0)
@@ -414,7 +432,7 @@ class ProClubsBot(discord.Client):
                                     
                                     update_player_match_history(
                                         guild_id, player_name, str(match_id),
-                                        match_goals, match_assists, clean_sheet, position
+                                        match_goals, match_assists, clean_sheet, position, match_result
                                     )
                                     break
                     except Exception as milestone_error:
@@ -428,6 +446,64 @@ class ProClubsBot(discord.Client):
                     )
                 except Exception as e:  # noqa: BLE001
                     logger.error(f"❌ [Guild {guild_id}] Error polling guild: {e}", exc_info=True)
+
+                # These checks run every poll cycle regardless of new league match
+                try:
+                    # Playoff match check (separate from league match)
+                    settings = get_settings(guild_id)
+                    last_playoff_id = settings.get("last_playoff_match_id") if settings else None
+
+                    playoff_match, playoff_mt = await fetch_latest_playoff_match(session, platform, club_id)
+                    if playoff_match:
+                        playoff_match_id = playoff_match.get("matchId", str(playoff_match.get("timestamp", 0)))
+                        if last_playoff_id is None or str(playoff_match_id) != str(last_playoff_id):
+                            logger.info(f"[Guild {guild_id}] [Playoffs] Playoff match detected: {playoff_match_id}")
+
+                            # Get channel to post playoff match
+                            try:
+                                po_channel = self.get_channel(int(channel_id))
+                                if po_channel is None:
+                                    po_channel = await self.fetch_channel(int(channel_id))
+
+                                if po_channel:
+                                    # Get club name for embed
+                                    po_info, po_platform = await fetch_club_info(session, platform, club_id)
+                                    if isinstance(po_info, dict):
+                                        po_club_info = po_info.get(str(club_id), {})
+                                    elif isinstance(po_info, list):
+                                        po_club_info = next((e for e in po_info if str(e.get("clubId")) == str(club_id)), {})
+                                    else:
+                                        po_club_info = {}
+                                    po_club_name = po_club_info.get("name", f"Club {club_id}")
+
+                                    playoff_embed = build_match_embed(
+                                        club_id, po_platform, playoff_match, playoff_mt,
+                                        club_name_hint=po_club_name,
+                                    )
+                                    await po_channel.send(embed=playoff_embed)
+                                    logger.info(f"✅ [Guild {guild_id}] [Playoffs] Posted playoff match {playoff_match_id}")
+                            except Exception as playoff_post_err:
+                                logger.error(f"[Guild {guild_id}] [Playoffs] Failed to post playoff match: {playoff_post_err}", exc_info=True)
+
+                            # Update last playoff match ID
+                            set_last_playoff_match_id(guild_id, str(playoff_match_id))
+
+                            # Process playoff stats
+                            await process_playoff_match(self, guild_id, playoff_match, playoff_mt, club_id)
+                except EAApiForbiddenError as e:
+                    self._ea_forbidden_until[int(guild_id)] = time.time() + EA_FORBIDDEN_COOLDOWN_SECONDS
+                    logger.error(
+                        f"[Guild {guild_id}] [Playoffs] EA API returned 403 ({e.path}). "
+                        f"Pausing this guild for {EA_FORBIDDEN_COOLDOWN_SECONDS}s before retry."
+                    )
+                except Exception as playoff_err:
+                    logger.error(f"[Guild {guild_id}] [Playoffs] Error checking playoff matches: {playoff_err}", exc_info=True)
+
+                # Month rollover check (POTM announcement)
+                try:
+                    await check_month_rollover(self, guild_id)
+                except Exception as monthly_err:
+                    logger.error(f"[Guild {guild_id}] [Monthly] Error checking month rollover: {monthly_err}", exc_info=True)
 
 
 client = ProClubsBot()
@@ -443,8 +519,6 @@ def _generate_player_chart(player_name: str, history: list) -> tuple | None:
     """
     if len(history) < MIN_CHART_DATA_POINTS:
         return None
-
-    import io
 
     match_nums = list(range(1, len(history) + 1))
     goals = [m["goals"] for m in history]
@@ -642,6 +716,79 @@ async def setachievementchannel(interaction: discord.Interaction, channel: disco
         f"Use `/listachievements` to see all available achievements!",
         ephemeral=True
     )
+
+
+@client.tree.command(name="setmonthlychannel", description="Set the channel for Player of the Month announcements.")
+@app_commands.describe(channel="Channel to receive monthly POTM announcements")
+async def setmonthlychannel(interaction: discord.Interaction, channel: discord.TextChannel):
+    """
+    Command: /setmonthlychannel
+    Sets the Discord channel where Player of the Month announcements will be posted.
+    """
+    await interaction.response.defer(ephemeral=True)
+    logger.info(f"[Command: setmonthlychannel] User {interaction.user} in guild {interaction.guild_id} setting monthly channel to #{channel.name} (ID: {channel.id})")
+
+    st = get_settings(interaction.guild_id)
+    if not st or not st.get("club_id"):
+        await interaction.followup.send("Set a club first with `/setclub`.", ephemeral=True)
+        return
+
+    upsert_settings(interaction.guild_id, monthly_channel_id=channel.id)
+    logger.info(f"✅ [Command: setmonthlychannel] Guild {interaction.guild_id} set monthly channel to #{channel.name} (ID: {channel.id})")
+    await interaction.followup.send(
+        f"✅ Player of the Month announcements will be posted in {channel.mention}.\n\n"
+        f"**How it works:**\n"
+        f"📊 All league matches are tracked throughout each month\n"
+        f"🏅 When a new month begins, the best performer is announced\n"
+        f"📈 Use `/potm` to see current month standings",
+        ephemeral=True
+    )
+
+
+@client.tree.command(name="potm", description="View current Player of the Month standings")
+async def potm(interaction: discord.Interaction):
+    """
+    Command: /potm
+    Displays current month's Player of the Month standings.
+    Shows top players, their scores, and matches played.
+    """
+    await interaction.response.defer(thinking=True)
+    logger.info(f"[Command: potm] User {interaction.user} in guild {interaction.guild_id} requesting POTM standings")
+
+    st = get_settings(interaction.guild_id)
+    if not st or not st.get("club_id"):
+        await interaction.followup.send("Set a club first with `/setclub`.", ephemeral=True)
+        return
+
+    current_month = detect_month_period()
+    stats = get_monthly_stats(interaction.guild_id, current_month)
+
+    if not stats:
+        await interaction.followup.send(
+            f"📊 No matches tracked yet for **{current_month}**.\n"
+            f"Stats are recorded automatically after each league match.",
+            ephemeral=True
+        )
+        return
+
+    embed = discord.Embed(
+        title="🏅 Player of the Month Standings",
+        description=f"**{current_month}** - Current Standings",
+        color=discord.Color.gold(),
+    )
+
+    medals = ["🥇", "🥈", "🥉"]
+    for i, player in enumerate(stats[:10]):
+        rank = medals[i] if i < 3 else f"{i + 1}."
+        avg_rating = player["avg_rating"]
+        embed.add_field(
+            name=f"{rank} {player['player_name']}",
+            value=f"Score: **{player['monthly_score']:.1f}** | ⚽ {player['goals']} | 🅰️ {player['assists']} | ⭐ {avg_rating:.1f} | 🎮 {player['matches_played']}",
+            inline=False
+        )
+
+    embed.set_footer(text="Score = Goals×10 + Assists×7 + Avg Rating×5 + Matches×2")
+    await interaction.followup.send(embed=embed)
 
 
 @client.tree.command(name="setplayoffsummarychannel", description="Set the channel for playoff summary announcements.")

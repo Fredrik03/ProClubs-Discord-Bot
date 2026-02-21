@@ -12,7 +12,7 @@ ACHIEVEMENT CATEGORIES:
 4. Team Performance: Team-based achievements
 5. Career Milestones: Long-term career accomplishments
 
-Total: 19 unique achievements available.
+Total: 33 unique achievements available.
 Each achievement is only announced once per player.
 """
 import logging
@@ -53,6 +53,30 @@ ACHIEVEMENTS = {
         "description": "Earn your first MOTM award",
         "category": "Match Performance"
     },
+    "brace": {
+        "name": "Brace",
+        "emoji": "✌️",
+        "description": "Score exactly 2 goals in a single match",
+        "category": "Match Performance"
+    },
+    "double_threat": {
+        "name": "Double Threat",
+        "emoji": "🔄",
+        "description": "Score 1+ goal AND 1+ assist in the same match",
+        "category": "Match Performance"
+    },
+    "poker": {
+        "name": "Poker",
+        "emoji": "🃏",
+        "description": "Score 4+ goals in a single match",
+        "category": "Match Performance"
+    },
+    "ghost": {
+        "name": "Ghost",
+        "emoji": "👻",
+        "description": "0 goals, 0 assists, rating below 5.0",
+        "category": "Match Performance"
+    },
     
     # Statistical Excellence
     "sharpshooter": {
@@ -85,6 +109,30 @@ ACHIEVEMENTS = {
         "description": "80%+ tackle success rate (min 500 tackles)",
         "category": "Statistical Excellence"
     },
+    "century": {
+        "name": "Century",
+        "emoji": "💯",
+        "description": "Score 100 career goals",
+        "category": "Statistical Excellence"
+    },
+    "provider": {
+        "name": "Provider",
+        "emoji": "🤝",
+        "description": "Provide 100 career assists",
+        "category": "Statistical Excellence"
+    },
+    "veteran": {
+        "name": "Veteran",
+        "emoji": "🎖️",
+        "description": "Play 200+ career matches",
+        "category": "Statistical Excellence"
+    },
+    "red_mist": {
+        "name": "Red Mist",
+        "emoji": "🟥",
+        "description": "Receive 10+ career red cards",
+        "category": "Statistical Excellence"
+    },
     
     # Streak & Consistency
     "on_fire": {
@@ -105,6 +153,18 @@ ACHIEVEMENTS = {
         "description": "5 clean sheets in a row (GK/Defender)",
         "category": "Streak & Consistency"
     },
+    "assist_streak": {
+        "name": "Assist Streak",
+        "emoji": "🅰️",
+        "description": "Assist in 5 consecutive matches",
+        "category": "Streak & Consistency"
+    },
+    "involvement": {
+        "name": "Involvement",
+        "emoji": "🌟",
+        "description": "Goal or assist in 10 consecutive matches",
+        "category": "Streak & Consistency"
+    },
     
     # Team Performance
     "demolition": {
@@ -118,6 +178,30 @@ ACHIEVEMENTS = {
         "emoji": "⚔️",
         "description": "Beat a team with 500+ skill rating difference",
         "category": "Team Performance"
+    },
+    "nil_nil": {
+        "name": "Nil-Nil Nightmare",
+        "emoji": "😴",
+        "description": "0-0 draw",
+        "category": "Team Performance"
+    },
+    "comeback_kings": {
+        "name": "Comeback Kings",
+        "emoji": "👑",
+        "description": "Win a match where opponent also scored",
+        "category": "Team Performance"
+    },
+    "fortress": {
+        "name": "Fortress",
+        "emoji": "🏰",
+        "description": "Win 5 matches in a row",
+        "category": "Streak & Consistency"
+    },
+    "draw_specialists": {
+        "name": "Draw Specialists",
+        "emoji": "🤝",
+        "description": "Draw 3 matches in a row",
+        "category": "Streak & Consistency"
     },
 
     # Match Performance (additional)
@@ -228,6 +312,39 @@ def check_achievements(guild_id: int, player_name: str, stats: dict, match_data:
                 **ACHIEVEMENTS["the_wall"]
             })
     
+    # Century - 100 career goals
+    if goals >= 100:
+        if not has_achievement_been_earned(guild_id, player_name, "century"):
+            achievements.append({
+                "id": "century",
+                **ACHIEVEMENTS["century"]
+            })
+
+    # Provider - 100 career assists
+    if assists >= 100:
+        if not has_achievement_been_earned(guild_id, player_name, "provider"):
+            achievements.append({
+                "id": "provider",
+                **ACHIEVEMENTS["provider"]
+            })
+
+    # Veteran - 200+ career matches
+    if matches_played >= 200:
+        if not has_achievement_been_earned(guild_id, player_name, "veteran"):
+            achievements.append({
+                "id": "veteran",
+                **ACHIEVEMENTS["veteran"]
+            })
+
+    # Red Mist - 10+ career red cards
+    red_cards = int(stats.get("redCards", 0) or 0)
+    if red_cards >= 10:
+        if not has_achievement_been_earned(guild_id, player_name, "red_mist"):
+            achievements.append({
+                "id": "red_mist",
+                **ACHIEVEMENTS["red_mist"]
+            })
+
     # Career Milestone Achievements
     if matches_played >= 50 and not has_achievement_been_earned(guild_id, player_name, "iron_man"):
         achievements.append({
@@ -301,6 +418,36 @@ def check_match_achievements(guild_id: int, player_name: str, match_data: dict) 
             **ACHIEVEMENTS["perfect_10"]
         })
     
+    # Brace - exactly 2 goals
+    if match_goals == 2 and not has_achievement_been_earned(guild_id, player_name, "brace"):
+        achievements.append({
+            "id": "brace",
+            **ACHIEVEMENTS["brace"]
+        })
+
+    # Double Threat - 1+ goal AND 1+ assist
+    if match_goals >= 1 and match_assists >= 1:
+        if not has_achievement_been_earned(guild_id, player_name, "double_threat"):
+            achievements.append({
+                "id": "double_threat",
+                **ACHIEVEMENTS["double_threat"]
+            })
+
+    # Poker - 4+ goals
+    if match_goals >= 4 and not has_achievement_been_earned(guild_id, player_name, "poker"):
+        achievements.append({
+            "id": "poker",
+            **ACHIEVEMENTS["poker"]
+        })
+
+    # Ghost - 0 goals, 0 assists, rating below 5.0
+    if match_goals == 0 and match_assists == 0 and match_rating < 5.0 and match_rating > 0:
+        if not has_achievement_been_earned(guild_id, player_name, "ghost"):
+            achievements.append({
+                "id": "ghost",
+                **ACHIEVEMENTS["ghost"]
+            })
+
     # Sniper - 5+ goals in a single match
     if match_goals >= 5 and not has_achievement_been_earned(guild_id, player_name, "sniper"):
         achievements.append({
@@ -354,7 +501,23 @@ def check_match_achievements(guild_id: int, player_name: str, match_data: dict) 
                     "id": "giant_killer",
                     **ACHIEVEMENTS["giant_killer"]
                 })
-    
+        
+        # Nil-Nil Nightmare - 0-0 draw
+        if result == "3" and our_score == 0 and opp_score == 0:
+            if not has_achievement_been_earned(guild_id, player_name, "nil_nil"):
+                achievements.append({
+                    "id": "nil_nil",
+                    **ACHIEVEMENTS["nil_nil"]
+                })
+
+        # Comeback Kings - Win a match where opponent also scored
+        if result == "1" and opp_score > 0:
+            if not has_achievement_been_earned(guild_id, player_name, "comeback_kings"):
+                achievements.append({
+                    "id": "comeback_kings",
+                    **ACHIEVEMENTS["comeback_kings"]
+                })
+
     return achievements
 
 
@@ -396,6 +559,46 @@ def check_streak_achievements(guild_id: int, player_name: str, stats: dict) -> l
                     **ACHIEVEMENTS["clean_sheet_specialist"]
                 })
     
+    # Check for "Assist Streak" - assist in 5 consecutive matches
+    if len(match_history) >= 5:
+        recent_5 = match_history[-5:]
+        if all(m.get("assists", 0) > 0 for m in recent_5):
+            if not has_achievement_been_earned(guild_id, player_name, "assist_streak"):
+                achievements.append({
+                    "id": "assist_streak",
+                    **ACHIEVEMENTS["assist_streak"]
+                })
+
+    # Check for "Involvement" - goal or assist in 10 consecutive matches
+    if len(match_history) >= 10:
+        recent_10 = match_history[-10:]
+        if all((m.get("goals", 0) > 0 or m.get("assists", 0) > 0) for m in recent_10):
+            if not has_achievement_been_earned(guild_id, player_name, "involvement"):
+                achievements.append({
+                    "id": "involvement",
+                    **ACHIEVEMENTS["involvement"]
+                })
+
+    # Check for "Fortress" - win 5 matches in a row
+    if len(match_history) >= 5:
+        recent_5 = match_history[-5:]
+        if all(m.get("result") == "W" for m in recent_5):
+            if not has_achievement_been_earned(guild_id, player_name, "fortress"):
+                achievements.append({
+                    "id": "fortress",
+                    **ACHIEVEMENTS["fortress"]
+                })
+
+    # Check for "Draw Specialists" - draw 3 matches in a row
+    if len(match_history) >= 3:
+        recent_3 = match_history[-3:]
+        if all(m.get("result") == "D" for m in recent_3):
+            if not has_achievement_been_earned(guild_id, player_name, "draw_specialists"):
+                achievements.append({
+                    "id": "draw_specialists",
+                    **ACHIEVEMENTS["draw_specialists"]
+                })
+
     return achievements
 
 
@@ -543,6 +746,43 @@ def check_historical_achievements(guild_id: int, player_name: str, stats: dict) 
             })
             record_achievement(guild_id, player_name, "the_wall")
     
+    # Century - 100 career goals
+    if goals >= 100:
+        if not has_achievement_been_earned(guild_id, player_name, "century"):
+            achievements.append({
+                "id": "century",
+                **ACHIEVEMENTS["century"]
+            })
+            record_achievement(guild_id, player_name, "century")
+
+    # Provider - 100 career assists
+    if assists >= 100:
+        if not has_achievement_been_earned(guild_id, player_name, "provider"):
+            achievements.append({
+                "id": "provider",
+                **ACHIEVEMENTS["provider"]
+            })
+            record_achievement(guild_id, player_name, "provider")
+
+    # Veteran - 200+ career matches
+    if matches_played >= 200:
+        if not has_achievement_been_earned(guild_id, player_name, "veteran"):
+            achievements.append({
+                "id": "veteran",
+                **ACHIEVEMENTS["veteran"]
+            })
+            record_achievement(guild_id, player_name, "veteran")
+
+    # Red Mist - 10+ career red cards
+    red_cards = int(stats.get("redCards", 0) or 0)
+    if red_cards >= 10:
+        if not has_achievement_been_earned(guild_id, player_name, "red_mist"):
+            achievements.append({
+                "id": "red_mist",
+                **ACHIEVEMENTS["red_mist"]
+            })
+            record_achievement(guild_id, player_name, "red_mist")
+
     # Career Milestone Achievements
     if matches_played >= 50 and not has_achievement_been_earned(guild_id, player_name, "iron_man"):
         achievements.append({
