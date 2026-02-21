@@ -787,6 +787,20 @@ async def potm(interaction: discord.Interaction):
             inline=False
         )
 
+    monthly_channel_id = st.get("monthly_channel_id")
+    if monthly_channel_id:
+        embed.add_field(
+            name="📢 Announcement Channel",
+            value=f"POTM will be announced in <#{monthly_channel_id}>",
+            inline=False
+        )
+    else:
+        embed.add_field(
+            name="📢 Announcement Channel",
+            value="No announcement channel set. Use `/setmonthlychannel` to configure one.",
+            inline=False
+        )
+
     embed.set_footer(text="Score = Goals×10 + Assists×7 + Avg Rating×5 + Matches×2")
     await interaction.followup.send(embed=embed)
 
