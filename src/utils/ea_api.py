@@ -329,6 +329,41 @@ async def fetch_latest_match(session, platform: str, club_id: int):
     return None, None
 
 
+async def fetch_latest_playoff_match(session, platform: str, club_id: int):
+    """
+    Fetch the latest playoff match specifically.
+    Uses matchType=playoffMatch to only get playoff matches,
+    separate from the league match fetch.
+
+    Returns:
+        Tuple of (match_dict, "playoffMatch") or (None, None) if no playoff matches found
+    """
+    logger.debug(f"[EA API] Fetching latest playoff match for club {club_id} on platform {platform}")
+
+    params = {
+        "platform": platform,
+        "clubIds": str(club_id),
+        "maxResultCount": "1",
+        "matchType": "playoffMatch"
+    }
+
+    try:
+        payload = await fetch_json(session, "/clubs/matches", params)
+        matches = payload if isinstance(payload, list) else payload.get("matches", [])
+
+        if matches and len(matches) > 0:
+            newest = matches[0]
+            match_id = newest.get("matchId", "unknown")
+            logger.info(f"[EA API] ✅ Found latest playoff match for club {club_id}: match_id={match_id}")
+            return newest, "playoffMatch"
+        else:
+            logger.debug(f"[EA API] No playoff matches found for club {club_id}")
+            return None, None
+    except Exception as e:
+        logger.debug(f"[EA API] Failed to fetch playoff matches for club {club_id}: {e}")
+        return None, None
+
+
 async def fetch_all_matches(session, platform: str, club_id: int, max_count: int = 100, match_type: str = None):
     """
     Get matches from the club's match history.

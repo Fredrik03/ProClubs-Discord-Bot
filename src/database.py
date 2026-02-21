@@ -8,6 +8,7 @@ TABLES:
 1. settings:
    - Stores guild configuration (club_id, platform, channel_id, etc.)
    - Tracks last_match_id to prevent duplicate match posts
+   - Tracks last_playoff_match_id for separate playoff deduplication
    - One row per Discord guild/server
 
 2. player_milestones:
@@ -19,6 +20,14 @@ TABLES:
    - Caches player names for autocomplete in slash commands
    - Updated when /clubstats or /playerstats is run
    - Improves user experience by showing current roster
+
+4. monthly_stats:
+   - Tracks player performance per calendar month for Player of the Month
+   - Primary key: (guild_id, player_name, month_period)
+
+5. monthly_announcements:
+   - Records which months have had POTM announced
+   - Prevents duplicate monthly announcements
 
 DATABASE LOCATION:
 ------------------
@@ -145,7 +154,29 @@ def init_db():
                     PRIMARY KEY (guild_id, playoff_period, match_id)
                 )
             """)
-            
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS monthly_stats (
+                    guild_id    INTEGER,
+                    player_name TEXT,
+                    month_period TEXT,  -- YYYY-MM format
+                    goals       INTEGER DEFAULT 0,
+                    assists     INTEGER DEFAULT 0,
+                    total_rating REAL DEFAULT 0.0,
+                    matches_played INTEGER DEFAULT 0,
+                    monthly_score REAL DEFAULT 0.0,
+                    updated_at  TEXT NOT NULL,
+                    PRIMARY KEY (guild_id, player_name, month_period)
+                )
+            """)
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS monthly_announcements (
+                    guild_id    INTEGER,
+                    month_period TEXT,  -- YYYY-MM format
+                    announced_at TEXT NOT NULL,
+                    PRIMARY KEY (guild_id, month_period)
+                )
+            """)
+
             # Migration: Add milestone_channel_id column if it doesn't exist
             cursor = db.execute("PRAGMA table_info(settings)")
             columns = [row[1] for row in cursor.fetchall()]
@@ -160,6 +191,14 @@ def init_db():
             if "playoff_summary_channel_id" not in columns:
                 db.execute("ALTER TABLE settings ADD COLUMN playoff_summary_channel_id INTEGER")
             
+            # Migration: Add last_playoff_match_id column if it doesn't exist
+            if "last_playoff_match_id" not in columns:
+                db.execute("ALTER TABLE settings ADD COLUMN last_playoff_match_id TEXT")
+
+            # Migration: Add monthly_channel_id column if it doesn't exist
+            if "monthly_channel_id" not in columns:
+                db.execute("ALTER TABLE settings ADD COLUMN monthly_channel_id INTEGER")
+
             # Migration: Add hat-trick columns to player_match_history if they don't exist
             cursor = db.execute("PRAGMA table_info(player_match_history)")
             match_history_columns = [row[1] for row in cursor.fetchall()]
@@ -169,6 +208,8 @@ def init_db():
                 db.execute("ALTER TABLE player_match_history ADD COLUMN assist_hat_trick INTEGER DEFAULT 0")
             if "position" not in match_history_columns:
                 db.execute("ALTER TABLE player_match_history ADD COLUMN position TEXT")
+            if "result" not in match_history_columns:
+                db.execute("ALTER TABLE player_match_history ADD COLUMN result TEXT")
         return True
     except Exception as e:
         raise RuntimeError(f"Failed to initialize database: {e}") from e
@@ -222,14 +263,14 @@ def get_settings(guild_id: int):
     try:
         with sqlite3.connect(DB_PATH) as db:
             cur = db.execute(
-                "SELECT guild_id, club_id, platform, channel_id, last_match_id, autopost, milestone_channel_id, achievement_channel_id, playoff_summary_channel_id FROM settings WHERE guild_id=?",
+                "SELECT guild_id, club_id, platform, channel_id, last_match_id, autopost, milestone_channel_id, achievement_channel_id, playoff_summary_channel_id, last_playoff_match_id, monthly_channel_id FROM settings WHERE guild_id=?",
                 (guild_id,),
             )
             row = cur.fetchone()
             if not row:
                 logger.debug(f"[Database] No settings found for guild {guild_id}")
                 return None
-            keys = ["guild_id", "club_id", "platform", "channel_id", "last_match_id", "autopost", "milestone_channel_id", "achievement_channel_id", "playoff_summary_channel_id"]
+            keys = ["guild_id", "club_id", "platform", "channel_id", "last_match_id", "autopost", "milestone_channel_id", "achievement_channel_id", "playoff_summary_channel_id", "last_playoff_match_id", "monthly_channel_id"]
             result = dict(zip(keys, row))
             logger.debug(f"[Database] Retrieved settings for guild {guild_id}: club_id={result.get('club_id')}, platform={result.get('platform')}, autopost={result.get('autopost')}")
             return result
@@ -414,10 +455,10 @@ def get_player_match_history(guild_id: int, player_name: str, limit: int = 20) -
         with sqlite3.connect(DB_PATH) as db:
             cur = db.execute(
                 """
-                SELECT match_id, goals, assists, clean_sheet, played_at 
-                FROM player_match_history 
-                WHERE guild_id=? AND player_name=? 
-                ORDER BY played_at DESC 
+                SELECT match_id, goals, assists, clean_sheet, played_at, result
+                FROM player_match_history
+                WHERE guild_id=? AND player_name=?
+                ORDER BY played_at DESC
                 LIMIT ?
                 """,
                 (guild_id, player_name, limit),
@@ -430,7 +471,8 @@ def get_player_match_history(guild_id: int, player_name: str, limit: int = 20) -
                     "goals": row[1],
                     "assists": row[2],
                     "clean_sheet": bool(row[3]),
-                    "played_at": row[4]
+                    "played_at": row[4],
+                    "result": row[5]
                 }
                 for row in reversed(rows)
             ]
@@ -439,22 +481,26 @@ def get_player_match_history(guild_id: int, player_name: str, limit: int = 20) -
         return []
 
 
-def update_player_match_history(guild_id: int, player_name: str, match_id: str, goals: int, assists: int, clean_sheet: bool, position: str = None):
-    """Add or update a player's match in their history."""
+def update_player_match_history(guild_id: int, player_name: str, match_id: str, goals: int, assists: int, clean_sheet: bool, position: str = None, result: str = None):
+    """Add or update a player's match in their history.
+
+    Args:
+        result: Match result for the team - 'W', 'L', or 'D' (optional)
+    """
     # Calculate hat-trick flags
     hat_trick = 1 if goals >= 3 else 0
     assist_hat_trick = 1 if assists >= 3 else 0
-    
-    logger.debug(f"[Database] Updating match history: player={player_name}, match={match_id}, goals={goals}, assists={assists}, position={position}, hat_trick={hat_trick}, assist_hat_trick={assist_hat_trick}")
+
+    logger.debug(f"[Database] Updating match history: player={player_name}, match={match_id}, goals={goals}, assists={assists}, position={position}, result={result}, hat_trick={hat_trick}, assist_hat_trick={assist_hat_trick}")
     try:
         with sqlite3.connect(DB_PATH) as db:
             db.execute(
                 """
-                INSERT OR REPLACE INTO player_match_history 
-                (guild_id, player_name, match_id, goals, assists, clean_sheet, hat_trick, assist_hat_trick, position, played_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT OR REPLACE INTO player_match_history
+                (guild_id, player_name, match_id, goals, assists, clean_sheet, hat_trick, assist_hat_trick, position, result, played_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (guild_id, player_name, match_id, goals, assists, 1 if clean_sheet else 0, hat_trick, assist_hat_trick, position, datetime.utcnow().isoformat()),
+                (guild_id, player_name, match_id, goals, assists, 1 if clean_sheet else 0, hat_trick, assist_hat_trick, position, result, datetime.utcnow().isoformat()),
             )
             db.commit()
         logger.debug(f"[Database] ✅ Match history updated successfully")
@@ -756,3 +802,128 @@ def get_playoff_club_stats(guild_id: int, playoff_period: str) -> dict:
         return None
 
 
+# ---------- Playoff Match ID Functions ----------
+
+def set_last_playoff_match_id(guild_id: int, match_id: str):
+    """Update the last posted playoff match ID for a guild."""
+    logger.debug(f"[Database] Updating last_playoff_match_id for guild {guild_id} to {match_id}")
+    try:
+        with sqlite3.connect(DB_PATH) as db:
+            db.execute(
+                "UPDATE settings SET last_playoff_match_id=?, updated_at=? WHERE guild_id=?",
+                (match_id, datetime.utcnow().isoformat(), guild_id),
+            )
+            db.commit()
+        logger.info(f"[Database] ✅ Updated last_playoff_match_id for guild {guild_id} to {match_id}")
+    except Exception as e:
+        logger.error(f"[Database] ❌ Failed to update last_playoff_match_id for guild {guild_id}: {e}", exc_info=True)
+        raise
+
+
+# ---------- Monthly Stats Functions ----------
+
+def update_monthly_stats(guild_id: int, player_name: str, month_period: str, goals: int, assists: int, rating: float):
+    """Update monthly stats for a player in a specific month period."""
+    logger.debug(f"[Database] Updating monthly stats: player={player_name}, period={month_period}, goals={goals}, assists={assists}, rating={rating}")
+    try:
+        with sqlite3.connect(DB_PATH) as db:
+            cur = db.execute(
+                "SELECT goals, assists, total_rating, matches_played FROM monthly_stats WHERE guild_id=? AND player_name=? AND month_period=?",
+                (guild_id, player_name, month_period)
+            )
+            row = cur.fetchone()
+
+            if row:
+                new_goals = row[0] + goals
+                new_assists = row[1] + assists
+                new_total_rating = row[2] + rating
+                new_matches = row[3] + 1
+            else:
+                new_goals = goals
+                new_assists = assists
+                new_total_rating = rating
+                new_matches = 1
+
+            # Score = (Goals x 10) + (Assists x 7) + (Avg Rating x 5) + (Matches Played x 2)
+            avg_rating = new_total_rating / new_matches if new_matches > 0 else 0
+            monthly_score = (new_goals * 10) + (new_assists * 7) + (avg_rating * 5) + (new_matches * 2)
+
+            db.execute(
+                """
+                INSERT OR REPLACE INTO monthly_stats
+                (guild_id, player_name, month_period, goals, assists, total_rating, matches_played, monthly_score, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (guild_id, player_name, month_period, new_goals, new_assists, new_total_rating, new_matches, monthly_score, datetime.utcnow().isoformat())
+            )
+            db.commit()
+        logger.debug(f"[Database] ✅ Monthly stats updated successfully")
+    except Exception as e:
+        logger.error(f"[Database] ❌ Failed to update monthly stats: {e}", exc_info=True)
+        raise
+
+
+def get_monthly_stats(guild_id: int, month_period: str) -> list[dict]:
+    """Get all player monthly stats for a specific period, sorted by score."""
+    try:
+        with sqlite3.connect(DB_PATH) as db:
+            cur = db.execute(
+                """
+                SELECT player_name, goals, assists, total_rating, matches_played, monthly_score
+                FROM monthly_stats
+                WHERE guild_id=? AND month_period=?
+                ORDER BY monthly_score DESC
+                """,
+                (guild_id, month_period)
+            )
+            rows = cur.fetchall()
+            return [
+                {
+                    "player_name": row[0],
+                    "goals": row[1],
+                    "assists": row[2],
+                    "total_rating": row[3],
+                    "matches_played": row[4],
+                    "monthly_score": row[5],
+                    "avg_rating": row[3] / row[4] if row[4] > 0 else 0
+                }
+                for row in rows
+            ]
+    except Exception as e:
+        logger.error(f"[Database] ❌ Failed to get monthly stats: {e}", exc_info=True)
+        return []
+
+
+def has_monthly_been_announced(guild_id: int, month_period: str) -> bool:
+    """Check if monthly POTM has been announced for this period."""
+    try:
+        with sqlite3.connect(DB_PATH) as db:
+            cur = db.execute(
+                "SELECT 1 FROM monthly_announcements WHERE guild_id=? AND month_period=?",
+                (guild_id, month_period)
+            )
+            exists = cur.fetchone() is not None
+            logger.debug(f"[Database] Monthly announcement check: period={month_period} = {'already announced' if exists else 'NOT announced'}")
+            return exists
+    except Exception as e:
+        logger.error(f"[Database] ❌ Failed to check monthly announcement: {e}", exc_info=True)
+        return False
+
+
+def mark_monthly_announced(guild_id: int, month_period: str):
+    """Mark that monthly POTM has been announced for this period."""
+    logger.debug(f"[Database] Marking monthly as announced: guild={guild_id}, period={month_period}")
+    try:
+        with sqlite3.connect(DB_PATH) as db:
+            db.execute(
+                """
+                INSERT OR IGNORE INTO monthly_announcements (guild_id, month_period, announced_at)
+                VALUES (?, ?, ?)
+                """,
+                (guild_id, month_period, datetime.utcnow().isoformat())
+            )
+            db.commit()
+        logger.debug(f"[Database] ✅ Monthly announcement marked")
+    except Exception as e:
+        logger.error(f"[Database] ❌ Failed to mark monthly announcement: {e}", exc_info=True)
+        raise
