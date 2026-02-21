@@ -181,7 +181,7 @@ async def check_month_rollover(client, guild_id: int):
         logger.info(f"[Monthly] Month rollover detected for guild {guild_id}: {last_month} -> {current_month}")
         _last_known_month[guild_id] = current_month
 
-        prev_month = previous_month_period()
+        prev_month = last_month
         stats = get_monthly_stats(guild_id, prev_month)
         if stats:
             logger.info(f"[Monthly] Found {len(stats)} players with stats for {prev_month}, announcing POTM")

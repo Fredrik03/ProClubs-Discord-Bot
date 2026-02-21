@@ -94,12 +94,8 @@ from monthly import (
 )
 from utils.ea_api import (
     platform_from_choice, parse_club_id_from_any, warmup_session,
-<<<<<<< HEAD
     fetch_club_info, fetch_latest_match, fetch_latest_playoff_match,
     fetch_json, HTTP_TIMEOUT, EAApiForbiddenError,
-=======
-    fetch_club_info, fetch_latest_match, fetch_json, HTTP_TIMEOUT, EAApiForbiddenError,
->>>>>>> origin/main
     fetch_all_matches, calculate_player_wld
 )
 from utils.embeds import build_match_embed, utc_to_str, PaginatedEmbedView
@@ -343,11 +339,6 @@ class ProClubsBot(discord.Client):
                         logger.error(f"[Guild {guild_id}] Failed to update last_match_id in database: {db_error}", exc_info=True)
                         # Don't continue here - match was posted, just DB update failed
                     
-                    # Step 7.5: Check if this is a playoff match and process accordingly
-                    if is_playoff_match(mt):
-                        logger.info(f"[Guild {guild_id}] Playoff match detected: {match_id}")
-                        await process_playoff_match(self, guild_id, match, mt, club_id)
-                    
                     # Track monthly stats for league matches (not playoffs)
                     if not is_playoff_match(mt):
                         process_league_match_monthly(guild_id, match, club_id)
@@ -499,6 +490,12 @@ class ProClubsBot(discord.Client):
 
                             # Process playoff stats
                             await process_playoff_match(self, guild_id, playoff_match, playoff_mt, club_id)
+                except EAApiForbiddenError as e:
+                    self._ea_forbidden_until[int(guild_id)] = time.time() + EA_FORBIDDEN_COOLDOWN_SECONDS
+                    logger.error(
+                        f"[Guild {guild_id}] [Playoffs] EA API returned 403 ({e.path}). "
+                        f"Pausing this guild for {EA_FORBIDDEN_COOLDOWN_SECONDS}s before retry."
+                    )
                 except Exception as playoff_err:
                     logger.error(f"[Guild {guild_id}] [Playoffs] Error checking playoff matches: {playoff_err}", exc_info=True)
 
@@ -523,11 +520,6 @@ def _generate_player_chart(player_name: str, history: list) -> tuple | None:
     if len(history) < MIN_CHART_DATA_POINTS:
         return None
 
-<<<<<<< HEAD
-=======
-    import io
-
->>>>>>> origin/main
     match_nums = list(range(1, len(history) + 1))
     goals = [m["goals"] for m in history]
     assists = [m["assists"] for m in history]
