@@ -23,6 +23,9 @@ logger = logging.getLogger('ProClubsBot.Monthly')
 # Track the last known month per guild to detect rollovers
 _last_known_month = {}
 
+# Minimum matches required to be eligible for Player of the Month
+MIN_MATCHES_FOR_POTM = 3
+
 
 def detect_month_period() -> str:
     """Return the current month period in YYYY-MM format."""
@@ -42,9 +45,19 @@ def process_league_match_monthly(guild_id: int, match_data: dict, club_id: int):
     """
     Update monthly stats for all players after a league match.
     Called from the polling loop after a new league match is detected.
+    Uses the match's own timestamp to assign stats to the correct month,
+    so matches played in a previous month are attributed correctly even if
+    the bot was offline at the time.
     """
     try:
-        month_period = detect_month_period()
+        # Use the match's own timestamp to determine the correct month
+        timestamp = match_data.get("timestamp")
+        if timestamp:
+            match_dt = datetime.fromtimestamp(int(timestamp), tz=timezone.utc)
+            month_period = match_dt.strftime("%Y-%m")
+        else:
+            month_period = detect_month_period()
+
         players = match_data.get("players", {})
         club_players = players.get(str(club_id), {})
 
@@ -62,29 +75,11 @@ def process_league_match_monthly(guild_id: int, match_data: dict, club_id: int):
         logger.error(f"[Monthly] Failed to process league match for monthly stats: {e}", exc_info=True)
 
 
-def calculate_player_of_month(guild_id: int, month_period: str) -> dict | None:
-    """
-    Calculate the Player of the Month.
-    Returns the best player's stats or None if no players found.
-    """
-    try:
-        stats = get_monthly_stats(guild_id, month_period)
-        if not stats:
-            logger.debug(f"[Monthly] No monthly stats found for guild {guild_id}, period {month_period}")
-            return None
-
-        best_player = stats[0]
-        logger.info(f"[Monthly] Player of the Month: {best_player['player_name']} with score {best_player['monthly_score']:.1f}")
-        return best_player
-    except Exception as e:
-        logger.error(f"[Monthly] Failed to calculate Player of the Month: {e}", exc_info=True)
-        return None
-
-
 async def announce_player_of_month(client, guild_id: int, month_period: str):
     """
     Announce the Player of the Month to the configured channel.
     Only announces if not already announced for this period.
+    Requires at least MIN_MATCHES_FOR_POTM matches to be eligible.
     """
     try:
         if has_monthly_been_announced(guild_id, month_period):
@@ -96,10 +91,18 @@ async def announce_player_of_month(client, guild_id: int, month_period: str):
             logger.warning(f"[Monthly] No monthly channel configured for guild {guild_id}")
             return
 
-        best_player = calculate_player_of_month(guild_id, month_period)
-        if not best_player:
+        all_stats = get_monthly_stats(guild_id, month_period)
+        if not all_stats:
             logger.warning(f"[Monthly] No monthly stats found for guild {guild_id}, period {month_period}")
             return
+
+        # Filter for players with enough matches to be eligible
+        eligible = [p for p in all_stats if p["matches_played"] >= MIN_MATCHES_FOR_POTM]
+        if not eligible:
+            logger.info(f"[Monthly] No players with {MIN_MATCHES_FOR_POTM}+ matches for {month_period}, using all players as fallback")
+            eligible = all_stats
+
+        best_player = eligible[0]
 
         channel = client.get_channel(settings["monthly_channel_id"])
         if not channel:
@@ -137,18 +140,17 @@ async def announce_player_of_month(client, guild_id: int, month_period: str):
             inline=True
         )
 
-        # Top 3 performers
-        all_stats = get_monthly_stats(guild_id, month_period)
-        if len(all_stats) > 1:
-            top_3_text = ""
-            medals = ["🥇", "🥈", "🥉"]
-            for i, player in enumerate(all_stats[:3]):
-                medal = medals[i] if i < 3 else f"{i+1}."
-                top_3_text += f"{medal} **{player['player_name']}** ({player['monthly_score']:.1f})\n"
+        # Runners-up: 2nd and 3rd place only (winner already shown above)
+        runners_up = eligible[1:3]
+        if runners_up:
+            medals = ["🥈", "🥉"]
+            runners_up_text = ""
+            for i, player in enumerate(runners_up):
+                runners_up_text += f"{medals[i]} **{player['player_name']}** ({player['monthly_score']:.1f})\n"
 
             embed.add_field(
-                name="🏅 Top Performers",
-                value=top_3_text,
+                name="🏅 Runners-up",
+                value=runners_up_text,
                 inline=False
             )
 
@@ -167,13 +169,26 @@ async def check_month_rollover(client, guild_id: int):
     Check if the month has changed since last poll cycle.
     If so, announce POTM for the previous month (if any matches were played).
     Called each poll cycle from bot_new.py.
+
+    On the first poll cycle after a bot restart, also checks whether the
+    previous month has unannounced POTM stats (which could have been missed
+    if the bot was down during the month rollover).
     """
     current_month = detect_month_period()
     last_month = _last_known_month.get(guild_id)
 
     if last_month is None:
-        # First time seeing this guild - just record the month
+        # First poll cycle after bot start - record the current month
         _last_known_month[guild_id] = current_month
+
+        # Check if the previous month had stats that were never announced
+        # (e.g., bot was down when the month rolled over)
+        prev_month = previous_month_period()
+        if not has_monthly_been_announced(guild_id, prev_month):
+            stats = get_monthly_stats(guild_id, prev_month)
+            if stats:
+                logger.info(f"[Monthly] Found unannounced POTM for {prev_month} after bot start, announcing now")
+                await announce_player_of_month(client, guild_id, prev_month)
         return
 
     if current_month != last_month:
