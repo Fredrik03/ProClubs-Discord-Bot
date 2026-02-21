@@ -3,5 +3,7 @@ python-dotenv==1.0.1
 httpx[http2]==0.27.2
 tenacity==9.0.0
 beautifulsoup4==4.12.3
+playwright==1.52.0
+matplotlib==3.10.8
 
 

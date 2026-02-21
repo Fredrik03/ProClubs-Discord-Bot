@@ -53,21 +53,26 @@ COMMON ISSUES:
    - Solution: Graceful handling with None returns
 """
 import re
+import os
+import json
 import random
 import logging
+import asyncio
+from urllib.parse import urlencode
 import aiohttp
 
 logger = logging.getLogger('ProClubsBot.EA_API')
 
 EA_BASE = "https://proclubs.ea.com/api/fc"
 SITE_URL = "https://proclubs.ea.com/"
-SITE_REFERER = "https://proclubs.ea.com/fc/clubs/overview"
+SITE_REFERER = "https://proclubs.ea.com/"
 
 # Browser-like headers improve success rate with EA's edge/WAF
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
     "Accept": "application/json, text/plain, */*",
-    "Referer": "https://www.ea.com/",
+    "Referer": "https://proclubs.ea.com/",
+    "Origin": "https://proclubs.ea.com",
     "Accept-Language": "en-US,en;q=0.9",
     "Accept-Encoding": "gzip, deflate, br",
     "Connection": "keep-alive",
@@ -80,6 +85,37 @@ HEADERS = {
 }
 
 HTTP_TIMEOUT = aiohttp.ClientTimeout(total=12, connect=5)
+EA_USE_PLAYWRIGHT = os.getenv("EA_USE_PLAYWRIGHT", "1").lower() in ("1", "true", "yes", "on")
+EA_PLAYWRIGHT_TIMEOUT_MS = int(os.getenv("EA_PLAYWRIGHT_TIMEOUT_MS", "12000"))
+
+try:
+    from playwright.async_api import async_playwright
+    PLAYWRIGHT_AVAILABLE = True
+except Exception:
+    PLAYWRIGHT_AVAILABLE = False
+
+_pw = None
+_pw_browser = None
+_pw_context = None
+_pw_page = None  # Persistent page on EA domain for fetch() calls
+_pw_init_lock = None
+
+
+class EAApiForbiddenError(RuntimeError):
+    """Raised when EA API consistently returns HTTP 403."""
+
+    def __init__(self, path: str, message: str):
+        super().__init__(message)
+        self.path = path
+
+
+class EAApiHttpError(RuntimeError):
+    """HTTP error for EA API requests across transports."""
+
+    def __init__(self, status: int, url: str, message: str):
+        super().__init__(message)
+        self.status = status
+        self.url = url
 
 
 def platform_from_choice(gen: str | None) -> str:
@@ -103,11 +139,147 @@ def parse_club_id_from_any(s: str) -> int | None:
     return None
 
 
+def _build_url(path: str, params: dict) -> str:
+    return f"{EA_BASE}{path}?{urlencode(params)}"
+
+
+async def _ensure_playwright_page():
+    """Ensure a persistent Playwright page on the EA domain.
+
+    Uses the system Chrome (channel="chrome") instead of bundled Chromium to
+    bypass Akamai bot detection. Keeps a persistent page open on the EA site
+    so that API calls can be made via fetch() with valid Akamai cookies.
+    """
+    global _pw, _pw_browser, _pw_context, _pw_page, _pw_init_lock
+    if _pw_page is not None:
+        return _pw_page
+
+    if _pw_init_lock is None:
+        _pw_init_lock = asyncio.Lock()
+
+    async with _pw_init_lock:
+        if _pw_page is not None:
+            return _pw_page
+
+        if not PLAYWRIGHT_AVAILABLE:
+            raise RuntimeError("Playwright is not installed")
+
+        _pw = await async_playwright().start()
+
+        # Try system Chrome first (harder for Akamai to fingerprint),
+        # fall back to bundled Chromium if Chrome isn't installed
+        for channel in ("chrome", None):
+            try:
+                _pw_browser = await _pw.chromium.launch(
+                    headless=True,
+                    channel=channel,
+                    args=[
+                        "--no-sandbox",
+                        "--disable-dev-shm-usage",
+                        "--disable-http2",
+                        "--disable-blink-features=AutomationControlled",
+                    ],
+                )
+                logger.info(f"[EA API] Launched browser (channel={channel or 'bundled chromium'})")
+                break
+            except Exception as e:
+                if channel is not None:
+                    logger.info(f"[EA API] System Chrome not available, trying bundled Chromium: {e}")
+                    continue
+                raise
+
+        _pw_context = await _pw_browser.new_context(
+            user_agent=HEADERS["User-Agent"],
+            locale="en-US",
+            extra_http_headers={
+                "Referer": HEADERS["Referer"],
+            },
+        )
+        # Hide automation indicators from Akamai bot detection
+        await _pw_context.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            // Remove Playwright/headless indicators
+            delete window.cdc_adoQpoasnfa76pfcZLmcfl_Array;
+            delete window.cdc_adoQpoasnfa76pfcZLmcfl_Promise;
+            delete window.cdc_adoQpoasnfa76pfcZLmcfl_Symbol;
+        """)
+
+        # Navigate to EA site — Akamai will run its bot detection JS and set cookies
+        _pw_page = await _pw_context.new_page()
+        try:
+            resp = await _pw_page.goto(SITE_URL, wait_until="networkidle", timeout=30000)
+            status = resp.status if resp else 'N/A'
+            logger.info(f"[EA API] Warmup: visited {SITE_URL} (status {status})")
+
+            if resp and resp.status == 403:
+                # Akamai may need time to run its JS challenge and set _abck cookie
+                logger.info("[EA API] Got 403, waiting for Akamai bot detection JS...")
+                await _pw_page.wait_for_timeout(5000)
+                resp2 = await _pw_page.reload(wait_until="networkidle", timeout=15000)
+                logger.info(f"[EA API] Warmup reload: status {resp2.status if resp2 else 'N/A'}")
+        except Exception as e:
+            logger.warning(f"[EA API] Warmup navigation failed (non-fatal): {e}")
+
+        logger.info("[EA API] Playwright transport initialized")
+        return _pw_page
+
+
 async def _get_json(session: aiohttp.ClientSession, url: str, params: dict):
     """Raw GET request returning JSON."""
     async with session.get(url, params=params, headers=HEADERS) as r:
         r.raise_for_status()
         return await r.json()
+
+
+async def _reset_playwright_page():
+    """Reset the persistent page by navigating back to the EA site."""
+    global _pw_page
+    if _pw_page is not None:
+        try:
+            await _pw_page.close()
+        except Exception:
+            pass
+        _pw_page = None
+
+
+async def _get_json_playwright(path: str, params: dict):
+    """GET JSON using fetch() from the persistent EA domain page.
+
+    Because the page has already passed Akamai's bot detection and has valid
+    cookies (_abck, bm_sz), fetch() calls from within it succeed where direct
+    HTTP requests would be blocked with 403.
+
+    If fetch() fails (e.g. stale page context), the page is reset and
+    re-initialized on the next call.
+    """
+    page = await _ensure_playwright_page()
+    url = _build_url(path, params)
+    try:
+        result = await page.evaluate(
+            """async (url) => {
+                const resp = await fetch(url, {
+                    method: 'GET',
+                    credentials: 'include',
+                    headers: { 'Accept': 'application/json, text/plain, */*' }
+                });
+                return { status: resp.status, body: await resp.text() };
+            }""",
+            url,
+        )
+    except Exception as e:
+        # Page context is likely dead/stale — reset it for next attempt
+        logger.warning(f"[EA API] fetch() failed, resetting page for next retry: {e}")
+        await _reset_playwright_page()
+        raise RuntimeError(f"Playwright fetch failed for {url}: {e}")
+
+    status = result["status"]
+    body = result["body"]
+    logger.debug(f"[EA API] Playwright fetch for {path}: status={status}, body_len={len(body)}")
+
+    if status >= 400:
+        raise EAApiHttpError(status, url, f"{status}, body='{body[:200]}'")
+
+    return json.loads(body)
 
 
 async def warmup_session(session: aiohttp.ClientSession):
@@ -122,6 +294,13 @@ async def warmup_session(session: aiohttp.ClientSession):
         session: aiohttp ClientSession to warm up
     """
     logger.debug("[EA API] Warming up session by visiting EA's website...")
+    if EA_USE_PLAYWRIGHT and PLAYWRIGHT_AVAILABLE:
+        try:
+            await _ensure_playwright_page()  # Warmup happens during page init
+            logger.debug("[EA API] Playwright warmup complete")
+            return
+        except Exception as e:
+            logger.warning(f"[EA API] Playwright warmup failed, falling back to aiohttp warmup: {e}")
     html_headers = {
         "User-Agent": "Mozilla/5.0",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -172,9 +351,30 @@ async def fetch_json(session: aiohttp.ClientSession, path: str, params: dict, ma
     for attempt in range(1, max_attempts + 1):
         try:
             logger.debug(f"[EA API] Attempt {attempt}/{max_attempts} for {path}")
-            data = await _get_json(session, url, params)
+            if EA_USE_PLAYWRIGHT and PLAYWRIGHT_AVAILABLE:
+                data = await _get_json_playwright(path, params)
+            else:
+                data = await _get_json(session, url, params)
             logger.info(f"[EA API] ✅ Successfully fetched {path} (attempt {attempt})")
             return data
+        except EAApiHttpError as e:
+            last_exc = e
+            if e.status in (403, 503):
+                # 403 Forbidden / 503 Service Unavailable - likely rate limiting or WAF
+                logger.warning(f"[EA API] ⚠️ HTTP {e.status} on {path} (attempt {attempt}/{max_attempts}) - possible rate limit or WAF block")
+                if attempt < max_attempts:
+                    sleep_time = random.uniform(0.5, 1.5)
+                    logger.debug(f"[EA API] Waiting {sleep_time:.2f}s before retry...")
+                    await asyncio.sleep(sleep_time)
+                    continue
+            else:
+                # Other HTTP errors (404, 500, etc.)
+                logger.warning(f"[EA API] ⚠️ HTTP {e.status} on {path} (attempt {attempt}/{max_attempts})")
+                if attempt < max_attempts:
+                    logger.debug(f"[EA API] Waiting 0.5s before retry...")
+                    await asyncio.sleep(0.5)
+                    continue
+                break
         except aiohttp.ClientResponseError as e:
             last_exc = e
             if e.status in (403, 503):
@@ -204,6 +404,10 @@ async def fetch_json(session: aiohttp.ClientSession, path: str, params: dict, ma
             break
 
     logger.error(f"[EA API] ❌ All {max_attempts} attempts failed for {path}: {last_exc}")
+    if isinstance(last_exc, aiohttp.ClientResponseError) and last_exc.status == 403:
+        raise EAApiForbiddenError(path, f"EA API forbidden after {max_attempts} attempts: {last_exc}")
+    if isinstance(last_exc, EAApiHttpError) and last_exc.status == 403:
+        raise EAApiForbiddenError(path, f"EA API forbidden after {max_attempts} attempts: {last_exc}")
     raise RuntimeError(f"EA API request failed after {max_attempts} attempts: {last_exc}")
 
 
@@ -227,6 +431,9 @@ async def fetch_club_info(session, platform: str, club_id: int):
         info = await fetch_json(session, "/clubs/info", {"platform": platform, "clubIds": str(club_id)})
         logger.info(f"[EA API] ✅ Successfully fetched club info for {club_id} on {platform}")
         return info, platform
+    except EAApiForbiddenError:
+        # Do not try fallback platform when blocked by WAF; that only increases blocked traffic.
+        raise
     except Exception as e:
         # Try the other generation platform
         other = "common-gen4" if platform == "common-gen5" else "common-gen5"
@@ -319,6 +526,9 @@ async def fetch_latest_match(session, platform: str, club_id: int):
                     # Other errors (network, etc.) - log and try next
                     logger.debug(f"[EA API] Error with {endpoint_path} and matchType={match_type_attempt or 'none'}: {e}, trying next option...")
                     continue
+            except EAApiForbiddenError:
+                # Hard WAF block, do not spam every endpoint/matchType combination.
+                raise
             except Exception as e:
                 # Other unexpected errors - log and try next
                 logger.debug(f"[EA API] Unexpected error with {endpoint_path} and matchType={match_type_attempt or 'none'}: {e}, trying next option...")
@@ -368,35 +578,55 @@ async def fetch_all_matches(session, platform: str, club_id: int, max_count: int
     """
     Get matches from the club's match history.
     Returns list of match dicts or empty list
-    
+
     Args:
         session: aiohttp ClientSession
         platform: Platform string (e.g., "common-gen5" or "common-gen4")
         club_id: Numeric club ID
         max_count: Maximum number of matches to fetch
-        match_type: Optional match type filter (e.g., "leagueMatch", "playoffMatch")
+        match_type: Optional match type filter (e.g., "leagueMatch", "playoffMatch").
+                    When None, multiple match types are tried automatically.
     """
-    # Use the working endpoint - fetch all match types by default
-    params = {
-        "platform": platform,
-        "clubIds": str(club_id),
-        "maxResultCount": str(max_count)
-    }
-    
-    # Add match type filter if specified
+    endpoint_attempts = [
+        "/clubs/matches",
+        "/matches",
+    ]
+
+    # If a specific match type is requested, only try that one; otherwise try known types
     if match_type:
-        params["matchType"] = match_type
-    
-    try:
-        payload = await fetch_json(session, "/clubs/matches", params)
-        matches = payload if isinstance(payload, list) else payload.get("matches", [])
-        if matches:
-            match_type_str = match_type if match_type else "all types"
-            logger.info(f"Found {len(matches)} matches for club {club_id} (type: {match_type_str})")
-            return matches
-    except Exception as e:
-        logger.warning(f"Failed fetching matches: {e}")
-    
+        match_type_attempts = [match_type]
+    else:
+        match_type_attempts = [
+            "leagueMatch",
+            "gameType11",
+            None,
+            "playoffMatch",
+        ]
+
+    for endpoint_path in endpoint_attempts:
+        for mt in match_type_attempts:
+            params = {
+                "platform": platform,
+                "clubIds": str(club_id),
+                "maxResultCount": str(max_count),
+            }
+            if mt:
+                params["matchType"] = mt
+
+            try:
+                logger.debug(f"[EA API] fetch_all_matches: trying {endpoint_path} matchType={mt or 'none'}")
+                payload = await fetch_json(session, endpoint_path, params)
+                matches = payload if isinstance(payload, list) else payload.get("matches", [])
+                if matches:
+                    logger.info(f"Found {len(matches)} matches for club {club_id} (endpoint={endpoint_path}, type={mt or 'none'})")
+                    return matches
+                logger.debug(f"[EA API] fetch_all_matches: no matches returned for {endpoint_path} matchType={mt or 'none'}")
+            except EAApiForbiddenError:
+                raise
+            except Exception as e:
+                logger.warning(f"[EA API] fetch_all_matches: failed for {endpoint_path} matchType={mt or 'none'}: {e}")
+
+    logger.error(f"[EA API] ❌ fetch_all_matches: all attempts exhausted for club {club_id}")
     return []
 
 
@@ -476,7 +706,5 @@ def calculate_player_wld(matches, club_id: int, player_name: str):
     return wins, losses, draws, matches_played
 
 
-# Import asyncio for sleep
-import asyncio
 
 
