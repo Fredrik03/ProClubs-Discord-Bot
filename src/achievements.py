@@ -10,8 +10,9 @@ ACHIEVEMENT CATEGORIES:
 2. Statistical Excellence: Long-term statistical achievements
 3. Streak & Consistency: Consecutive match achievements
 4. Team Performance: Team-based achievements
+5. Career Milestones: Long-term career accomplishments
 
-Total: 29 unique achievements available.
+Total: 33 unique achievements available.
 Each achievement is only announced once per player.
 """
 import logging
@@ -76,7 +77,7 @@ ACHIEVEMENTS = {
         "description": "0 goals, 0 assists, rating below 5.0",
         "category": "Match Performance"
     },
-
+    
     # Statistical Excellence
     "sharpshooter": {
         "name": "Sharpshooter",
@@ -126,19 +127,13 @@ ACHIEVEMENTS = {
         "description": "Play 200+ career matches",
         "category": "Statistical Excellence"
     },
-    "iron_man": {
-        "name": "Iron Man",
-        "emoji": "🦾",
-        "description": "Play 500+ career matches",
-        "category": "Statistical Excellence"
-    },
     "red_mist": {
         "name": "Red Mist",
         "emoji": "🟥",
         "description": "Receive 10+ career red cards",
         "category": "Statistical Excellence"
     },
-
+    
     # Streak & Consistency
     "on_fire": {
         "name": "On Fire",
@@ -170,7 +165,7 @@ ACHIEVEMENTS = {
         "description": "Goal or assist in 10 consecutive matches",
         "category": "Streak & Consistency"
     },
-
+    
     # Team Performance
     "demolition": {
         "name": "Demolition",
@@ -187,26 +182,60 @@ ACHIEVEMENTS = {
     "nil_nil": {
         "name": "Nil-Nil Nightmare",
         "emoji": "😴",
-        "description": "Be part of a 0-0 draw",
+        "description": "0-0 draw",
         "category": "Team Performance"
     },
     "comeback_kings": {
         "name": "Comeback Kings",
         "emoji": "👑",
-        "description": "Win a match where the opponent also scored",
+        "description": "Win a match where opponent also scored",
         "category": "Team Performance"
     },
     "fortress": {
         "name": "Fortress",
         "emoji": "🏰",
-        "description": "Win 5 matches in a row (team streak)",
-        "category": "Team Performance"
+        "description": "Win 5 matches in a row",
+        "category": "Streak & Consistency"
     },
     "draw_specialists": {
         "name": "Draw Specialists",
         "emoji": "🤝",
         "description": "Draw 3 matches in a row",
-        "category": "Team Performance"
+        "category": "Streak & Consistency"
+    },
+
+    # Match Performance (additional)
+    "double_trouble": {
+        "name": "Double Trouble",
+        "emoji": "💫",
+        "description": "Score 2+ goals AND 2+ assists in a single match",
+        "category": "Match Performance"
+    },
+    "sniper": {
+        "name": "Sniper",
+        "emoji": "🏹",
+        "description": "Score 5+ goals in a single match",
+        "category": "Match Performance"
+    },
+    "unsung_hero": {
+        "name": "Unsung Hero",
+        "emoji": "🦸",
+        "description": "Win Man of the Match without scoring or assisting",
+        "category": "Match Performance"
+    },
+
+    # Career Milestones
+    "iron_man": {
+        "name": "Iron Man",
+        "emoji": "🦾",
+        "description": "Play 50+ matches",
+        "category": "Career Milestones"
+    },
+    "consistent_performer": {
+        "name": "Consistent Performer",
+        "emoji": "📈",
+        "description": "Maintain 7.5+ average rating over 20+ matches",
+        "category": "Career Milestones"
     },
 }
 
@@ -231,6 +260,7 @@ def check_achievements(guild_id: int, player_name: str, stats: dict, match_data:
     goals = int(stats.get("goals", 0) or 0)
     assists = int(stats.get("assists", 0) or 0)
     motm = int(stats.get("manOfTheMatch", 0) or 0)
+    rating = float(stats.get("ratingAve", 0) or 0)
     shot_accuracy = int(stats.get("shotSuccessRate", 0) or 0)
     pass_accuracy = int(stats.get("passSuccessRate", 0) or 0)
     tackle_success = int(stats.get("tackleSuccessRate", 0) or 0)
@@ -281,7 +311,7 @@ def check_achievements(guild_id: int, player_name: str, stats: dict, match_data:
                 "id": "the_wall",
                 **ACHIEVEMENTS["the_wall"]
             })
-
+    
     # Century - 100 career goals
     if goals >= 100:
         if not has_achievement_been_earned(guild_id, player_name, "century"):
@@ -306,14 +336,6 @@ def check_achievements(guild_id: int, player_name: str, stats: dict, match_data:
                 **ACHIEVEMENTS["veteran"]
             })
 
-    # Iron Man - 500+ career matches
-    if matches_played >= 500:
-        if not has_achievement_been_earned(guild_id, player_name, "iron_man"):
-            achievements.append({
-                "id": "iron_man",
-                **ACHIEVEMENTS["iron_man"]
-            })
-
     # Red Mist - 10+ career red cards
     red_cards = int(stats.get("redCards", 0) or 0)
     if red_cards >= 10:
@@ -323,6 +345,20 @@ def check_achievements(guild_id: int, player_name: str, stats: dict, match_data:
                 **ACHIEVEMENTS["red_mist"]
             })
 
+    # Career Milestone Achievements
+    if matches_played >= 50 and not has_achievement_been_earned(guild_id, player_name, "iron_man"):
+        achievements.append({
+            "id": "iron_man",
+            **ACHIEVEMENTS["iron_man"]
+        })
+    
+    if matches_played >= 20 and rating >= 7.5:
+        if not has_achievement_been_earned(guild_id, player_name, "consistent_performer"):
+            achievements.append({
+                "id": "consistent_performer",
+                **ACHIEVEMENTS["consistent_performer"]
+            })
+    
     # Match-specific achievements (if match data provided)
     if match_data:
         achievements.extend(check_match_achievements(guild_id, player_name, match_data))
@@ -381,7 +417,7 @@ def check_match_achievements(guild_id: int, player_name: str, match_data: dict) 
             "id": "perfect_10",
             **ACHIEVEMENTS["perfect_10"]
         })
-
+    
     # Brace - exactly 2 goals
     if match_goals == 2 and not has_achievement_been_earned(guild_id, player_name, "brace"):
         achievements.append({
@@ -412,6 +448,27 @@ def check_match_achievements(guild_id: int, player_name: str, match_data: dict) 
                 **ACHIEVEMENTS["ghost"]
             })
 
+    # Sniper - 5+ goals in a single match
+    if match_goals >= 5 and not has_achievement_been_earned(guild_id, player_name, "sniper"):
+        achievements.append({
+            "id": "sniper",
+            **ACHIEVEMENTS["sniper"]
+        })
+    
+    # Double Trouble - 2+ goals AND 2+ assists in a single match
+    if match_goals >= 2 and match_assists >= 2 and not has_achievement_been_earned(guild_id, player_name, "double_trouble"):
+        achievements.append({
+            "id": "double_trouble",
+            **ACHIEVEMENTS["double_trouble"]
+        })
+    
+    # Unsung Hero - Win MOTM without scoring or assisting
+    if is_motm and match_goals == 0 and match_assists == 0 and not has_achievement_been_earned(guild_id, player_name, "unsung_hero"):
+        achievements.append({
+            "id": "unsung_hero",
+            **ACHIEVEMENTS["unsung_hero"]
+        })
+    
     # Team Performance Achievements
     if club_id:
         clubs = match_data.get("clubs", {})
@@ -437,14 +494,14 @@ def check_match_achievements(guild_id: int, player_name: str, match_data: dict) 
         our_rating = int(our_club.get("skillrating", 0) or 0)
         opp_rating = int(opponent_club.get("skillrating", 0) or 0)
         rating_diff = opp_rating - our_rating
-
+        
         if result == "1" and rating_diff >= 500:
             if not has_achievement_been_earned(guild_id, player_name, "giant_killer"):
                 achievements.append({
                     "id": "giant_killer",
                     **ACHIEVEMENTS["giant_killer"]
                 })
-
+        
         # Nil-Nil Nightmare - 0-0 draw
         if result == "3" and our_score == 0 and opp_score == 0:
             if not has_achievement_been_earned(guild_id, player_name, "nil_nil"):
@@ -501,7 +558,7 @@ def check_streak_achievements(guild_id: int, player_name: str, stats: dict) -> l
                     "id": "clean_sheet_specialist",
                     **ACHIEVEMENTS["clean_sheet_specialist"]
                 })
-
+    
     # Check for "Assist Streak" - assist in 5 consecutive matches
     if len(match_history) >= 5:
         recent_5 = match_history[-5:]
@@ -522,7 +579,7 @@ def check_streak_achievements(guild_id: int, player_name: str, stats: dict) -> l
                     **ACHIEVEMENTS["involvement"]
                 })
 
-    # Check for "Fortress" - win 5 matches in a row (team streak)
+    # Check for "Fortress" - win 5 matches in a row
     if len(match_history) >= 5:
         recent_5 = match_history[-5:]
         if all(m.get("result") == "W" for m in recent_5):
@@ -611,6 +668,8 @@ def check_historical_achievements(guild_id: int, player_name: str, stats: dict) 
     - Goal Machine (2+ goals per game)
     - Midfield Maestro (90%+ pass accuracy)
     - The Wall (80%+ tackle success)
+    - Iron Man (50+ matches)
+    - Consistent Performer (7.5+ avg rating over 20+ matches)
     
     Skips match-specific achievements (hat tricks, perfect 10s, etc.) and
     streak achievements (on fire, clean sheets, etc.) since we don't have
@@ -686,7 +745,7 @@ def check_historical_achievements(guild_id: int, player_name: str, stats: dict) 
                 **ACHIEVEMENTS["the_wall"]
             })
             record_achievement(guild_id, player_name, "the_wall")
-
+    
     # Century - 100 career goals
     if goals >= 100:
         if not has_achievement_been_earned(guild_id, player_name, "century"):
@@ -714,15 +773,6 @@ def check_historical_achievements(guild_id: int, player_name: str, stats: dict) 
             })
             record_achievement(guild_id, player_name, "veteran")
 
-    # Iron Man - 500+ career matches
-    if matches_played >= 500:
-        if not has_achievement_been_earned(guild_id, player_name, "iron_man"):
-            achievements.append({
-                "id": "iron_man",
-                **ACHIEVEMENTS["iron_man"]
-            })
-            record_achievement(guild_id, player_name, "iron_man")
-
     # Red Mist - 10+ career red cards
     red_cards = int(stats.get("redCards", 0) or 0)
     if red_cards >= 10:
@@ -733,6 +783,22 @@ def check_historical_achievements(guild_id: int, player_name: str, stats: dict) 
             })
             record_achievement(guild_id, player_name, "red_mist")
 
+    # Career Milestone Achievements
+    if matches_played >= 50 and not has_achievement_been_earned(guild_id, player_name, "iron_man"):
+        achievements.append({
+            "id": "iron_man",
+            **ACHIEVEMENTS["iron_man"]
+        })
+        record_achievement(guild_id, player_name, "iron_man")
+    
+    rating = float(stats.get("ratingAve", 0) or 0)
+    if matches_played >= 20 and rating >= 7.5 and not has_achievement_been_earned(guild_id, player_name, "consistent_performer"):
+        achievements.append({
+            "id": "consistent_performer",
+            **ACHIEVEMENTS["consistent_performer"]
+        })
+        record_achievement(guild_id, player_name, "consistent_performer")
+    
     return achievements
 
 

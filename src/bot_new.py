@@ -40,15 +40,16 @@ KEY COMPONENTS:
    - /setmatchchannel: Set where matches are posted
    - /setmilestonechannel: Set where milestones are announced
    - /setachievementchannel: Set where achievements are announced
-   - /setplayoffsummarychannel: Set where playoff summaries are posted
    - /setmonthlychannel: Set where Player of the Month announcements go
+   - /potm: View current Player of the Month standings
    - /clubstats: View overall club statistics
    - /playerstats: View individual player stats
    - /lastmatches: View recent match history
    - /leaderboard: View player leaderboards
    - /achievements: View a player's earned achievements
    - /listachievements: List all available achievements
-   - /potm: View current Player of the Month standings
+   - /lastperformance: View a player's stats over their last 10 matches
+   - /statsovertime: Visualize goals/assists rates over time as a chart
 
 LOGGING:
 --------
@@ -60,10 +61,12 @@ All operations are logged with descriptive prefixes:
 
 Use these prefixes to quickly identify issues in the console logs.
 """
+import io
 import os
 import re
 import logging
 import asyncio
+import time
 import aiohttp
 import discord
 from discord import app_commands
@@ -92,9 +95,17 @@ from monthly import (
 from utils.ea_api import (
     platform_from_choice, parse_club_id_from_any, warmup_session,
     fetch_club_info, fetch_latest_match, fetch_latest_playoff_match,
-    fetch_json, HTTP_TIMEOUT, fetch_all_matches, calculate_player_wld
+    fetch_json, HTTP_TIMEOUT, EAApiForbiddenError,
+    fetch_all_matches, calculate_player_wld
 )
-from utils.embeds import build_match_embed, utc_to_str
+from utils.embeds import build_match_embed, utc_to_str, PaginatedEmbedView
+
+# Set Matplotlib backend before any pyplot import so it works correctly
+# in a headless server environment and across repeated command invocations.
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
 
 # ---------- logging ----------
 logging.basicConfig(
@@ -110,6 +121,8 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = os.getenv("GUILD_ID")  # optional for fast guild sync
 
 POLL_INTERVAL_SECONDS = 60
+EA_FORBIDDEN_COOLDOWN_SECONDS = 600
+MIN_CHART_DATA_POINTS = 2  # minimum match-history entries needed to render a chart
 
 
 # ---------- Bot Class ----------
@@ -118,6 +131,7 @@ class ProClubsBot(discord.Client):
         intents = discord.Intents.default()
         super().__init__(intents=intents)
         self.tree = app_commands.CommandTree(self)
+        self._ea_forbidden_until: dict[int, float] = {}
 
     async def on_ready(self):
         logger.info(f"Logged in as {self.user} (id: {self.user.id})")
@@ -184,11 +198,22 @@ class ProClubsBot(discord.Client):
                 if autopost != 1:
                     logger.debug(f"Guild {guild_id} autopost is disabled (autopost={autopost}), skipping")
                     continue
+
+                blocked_until = self._ea_forbidden_until.get(int(guild_id), 0.0)
+                now_ts = time.time()
+                if blocked_until > now_ts:
+                    remaining = int(blocked_until - now_ts)
+                    logger.warning(
+                        f"[Guild {guild_id}] Skipping EA poll due to recent 403 block "
+                        f"(cooldown remaining: {remaining}s)"
+                    )
+                    continue
                 
                 try:
                     # Step 1: Fetch club info to get club name
                     logger.debug(f"[Guild {guild_id}] Fetching club info for club {club_id}...")
                     info, used_platform = await fetch_club_info(session, platform, club_id)
+                    self._ea_forbidden_until.pop(int(guild_id), None)
                     
                     # EA API returns different formats, normalize to dict
                     if isinstance(info, list):
@@ -314,10 +339,15 @@ class ProClubsBot(discord.Client):
                         logger.error(f"[Guild {guild_id}] Failed to update last_match_id in database: {db_error}", exc_info=True)
                         # Don't continue here - match was posted, just DB update failed
                     
-                    # Step 7.5: Track monthly stats for league matches
+                    # Step 7.5: Check if this is a playoff match and process accordingly
+                    if is_playoff_match(mt):
+                        logger.info(f"[Guild {guild_id}] Playoff match detected: {match_id}")
+                        await process_playoff_match(self, guild_id, match, mt, club_id)
+                    
+                    # Track monthly stats for league matches (not playoffs)
                     if not is_playoff_match(mt):
                         process_league_match_monthly(guild_id, match, club_id)
-
+                    
                     # Step 8: Check for milestones and achievements
                     logger.debug(f"[Guild {guild_id}] Checking for player milestones and achievements...")
                     try:
@@ -388,20 +418,23 @@ class ProClubsBot(discord.Client):
                                 if isinstance(pdata, dict) and pdata.get("playername", "").lower() == player_name.lower():
                                     match_goals = int(pdata.get("goals", 0) or 0)
                                     match_assists = int(pdata.get("assists", 0) or 0)
-
+                                    
                                     # Extract position played in this match
-                                    position = (pdata.get("pos") or pdata.get("position") or
+                                    # Check various possible field names for position
+                                    position = (pdata.get("pos") or pdata.get("position") or 
                                                pdata.get("posSorted") or pdata.get("positionSorted") or
                                                member.get("favoritePosition") or "Unknown")
-
+                                    
                                     # Debug logging for ANY position investigation
+                                    # This helps us understand if EA API separates AI stats from Pro stats
                                     if str(position).upper() == "ANY" or str(position) == "28":
                                         logger.info(f"[ANY Position Debug] Player: {player_name}, Position: {position}, Goals: {match_goals}, Assists: {match_assists}")
                                         logger.debug(f"[ANY Position Debug] Full player data: {pdata}")
+                                        # Check for fields that might indicate AI vs Pro
                                         vproattr = pdata.get("vproattr")
                                         if vproattr:
                                             logger.debug(f"[ANY Position Debug] vproattr present: {vproattr}")
-
+                                    
                                     update_player_match_history(
                                         guild_id, player_name, str(match_id),
                                         match_goals, match_assists, clean_sheet, position, match_result
@@ -410,6 +443,12 @@ class ProClubsBot(discord.Client):
                     except Exception as milestone_error:
                         logger.error(f"[Guild {guild_id}] Error checking milestones/achievements: {milestone_error}", exc_info=True)
                     
+                except EAApiForbiddenError as e:
+                    self._ea_forbidden_until[int(guild_id)] = time.time() + EA_FORBIDDEN_COOLDOWN_SECONDS
+                    logger.error(
+                        f"[Guild {guild_id}] EA API returned 403 ({e.path}). "
+                        f"Pausing this guild for {EA_FORBIDDEN_COOLDOWN_SECONDS}s before retry."
+                    )
                 except Exception as e:  # noqa: BLE001
                     logger.error(f"❌ [Guild {guild_id}] Error polling guild: {e}", exc_info=True)
 
@@ -467,6 +506,62 @@ class ProClubsBot(discord.Client):
 
 
 client = ProClubsBot()
+
+
+def _generate_player_chart(player_name: str, history: list) -> tuple | None:
+    """
+    Render a goals/assists-over-time chart for *player_name* using *history*
+    (list of dicts with "goals" and "assists" keys).
+
+    Returns a ``(discord.File, filename)`` tuple, or ``None`` when there are
+    fewer than ``MIN_CHART_DATA_POINTS`` data-points.
+    """
+    if len(history) < MIN_CHART_DATA_POINTS:
+        return None
+
+    match_nums = list(range(1, len(history) + 1))
+    goals = [m["goals"] for m in history]
+    assists = [m["assists"] for m in history]
+    cum_gpg = [sum(goals[:i + 1]) / (i + 1) for i in range(len(goals))]
+    cum_apg = [sum(assists[:i + 1]) / (i + 1) for i in range(len(assists))]
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 7), sharex=True)
+    fig.patch.set_facecolor("#2f3136")
+    for ax in (ax1, ax2):
+        ax.set_facecolor("#36393f")
+        ax.tick_params(colors="white")
+        ax.spines[:].set_color("#555")
+        ax.yaxis.label.set_color("white")
+        ax.xaxis.label.set_color("white")
+        ax.title.set_color("white")
+
+    ax1.bar(match_nums, goals, color="#e74c3c", alpha=0.7, label="Goals (match)")
+    ax1.plot(match_nums, cum_gpg, color="#ff9966", linewidth=2, marker="o",
+             markersize=4, label="Goals/game (cumulative avg)")
+    ax1.set_ylabel("Goals", color="white")
+    ax1.set_title(f"Goals Over Time — {player_name}", color="white")
+    ax1.legend(facecolor="#2f3136", labelcolor="white")
+    ax1.yaxis.set_major_locator(mticker.MaxNLocator(integer=True))
+
+    ax2.bar(match_nums, assists, color="#3498db", alpha=0.7, label="Assists (match)")
+    ax2.plot(match_nums, cum_apg, color="#66ccff", linewidth=2, marker="o",
+             markersize=4, label="Assists/game (cumulative avg)")
+    ax2.set_xlabel("Match #", color="white")
+    ax2.set_ylabel("Assists", color="white")
+    ax2.set_title(f"Assists Over Time — {player_name}", color="white")
+    ax2.legend(facecolor="#2f3136", labelcolor="white")
+    ax2.yaxis.set_major_locator(mticker.MaxNLocator(integer=True))
+
+    plt.tight_layout(pad=2.0)
+
+    buf = io.BytesIO()
+    plt.savefig(buf, format="png", dpi=120, facecolor=fig.get_facecolor())
+    plt.close(fig)
+    buf.seek(0)
+
+    filename = f"{player_name}_stats.png"
+    return discord.File(buf, filename=filename), filename
+
 
 # ---------- Slash commands ----------
 
@@ -622,39 +717,6 @@ async def setachievementchannel(interaction: discord.Interaction, channel: disco
     )
 
 
-@client.tree.command(name="setplayoffsummarychannel", description="Set the channel for playoff summary announcements.")
-@app_commands.describe(channel="Channel to receive playoff summaries")
-async def setplayoffsummarychannel(interaction: discord.Interaction, channel: discord.TextChannel):
-    """
-    Command: /setplayoffsummarychannel
-    Sets the Discord channel where "Player of the Playoffs" announcements will be posted.
-    These are posted monthly after 15 playoff matches are completed.
-    """
-    await interaction.response.defer(ephemeral=True)
-    logger.info(f"[Command: setplayoffsummarychannel] User {interaction.user} in guild {interaction.guild_id} setting playoff summary channel to #{channel.name} (ID: {channel.id})")
-    
-    # Check if club has been configured first
-    st = get_settings(interaction.guild_id)
-    if not st or not st.get("club_id"):
-        logger.warning(f"[Command: setplayoffsummarychannel] Guild {interaction.guild_id} tried to set playoff summary channel without setting club first")
-        await interaction.followup.send("Set a club first with `/setclub`.", ephemeral=True)
-        return
-
-    # Save playoff summary channel settings
-    logger.debug(f"[Command: setplayoffsummarychannel] Saving playoff summary channel to database: guild_id={interaction.guild_id}, playoff_summary_channel_id={channel.id}")
-    upsert_settings(interaction.guild_id, playoff_summary_channel_id=channel.id)
-    logger.info(f"✅ [Command: setplayoffsummarychannel] Guild {interaction.guild_id} set playoff summary channel to #{channel.name} (ID: {channel.id})")
-    await interaction.followup.send(
-        f"✅ Playoff summaries will be posted in {channel.mention}.\n\n"
-        f"**Playoff Summary includes:**\n"
-        f"🏆 Player of the Playoffs winner\n"
-        f"📊 Top 3 performers\n"
-        f"⭐ Performance scores\n\n"
-        f"*Summaries are posted automatically after 15 playoff matches each month.*",
-        ephemeral=True
-    )
-
-
 @client.tree.command(name="setmonthlychannel", description="Set the channel for Player of the Month announcements.")
 @app_commands.describe(channel="Channel to receive monthly POTM announcements")
 async def setmonthlychannel(interaction: discord.Interaction, channel: discord.TextChannel):
@@ -726,6 +788,39 @@ async def potm(interaction: discord.Interaction):
 
     embed.set_footer(text="Score = Goals×10 + Assists×7 + Avg Rating×5 + Matches×2")
     await interaction.followup.send(embed=embed)
+
+
+@client.tree.command(name="setplayoffsummarychannel", description="Set the channel for playoff summary announcements.")
+@app_commands.describe(channel="Channel to receive playoff summaries")
+async def setplayoffsummarychannel(interaction: discord.Interaction, channel: discord.TextChannel):
+    """
+    Command: /setplayoffsummarychannel
+    Sets the Discord channel where "Player of the Playoffs" announcements will be posted.
+    These are posted monthly after 15 playoff matches are completed.
+    """
+    await interaction.response.defer(ephemeral=True)
+    logger.info(f"[Command: setplayoffsummarychannel] User {interaction.user} in guild {interaction.guild_id} setting playoff summary channel to #{channel.name} (ID: {channel.id})")
+    
+    # Check if club has been configured first
+    st = get_settings(interaction.guild_id)
+    if not st or not st.get("club_id"):
+        logger.warning(f"[Command: setplayoffsummarychannel] Guild {interaction.guild_id} tried to set playoff summary channel without setting club first")
+        await interaction.followup.send("Set a club first with `/setclub`.", ephemeral=True)
+        return
+
+    # Save playoff summary channel settings
+    logger.debug(f"[Command: setplayoffsummarychannel] Saving playoff summary channel to database: guild_id={interaction.guild_id}, playoff_summary_channel_id={channel.id}")
+    upsert_settings(interaction.guild_id, playoff_summary_channel_id=channel.id)
+    logger.info(f"✅ [Command: setplayoffsummarychannel] Guild {interaction.guild_id} set playoff summary channel to #{channel.name} (ID: {channel.id})")
+    await interaction.followup.send(
+        f"✅ Playoff summaries will be posted in {channel.mention}.\n\n"
+        f"**Playoff Summary includes:**\n"
+        f"🏆 Player of the Playoffs winner\n"
+        f"📊 Top 3 performers\n"
+        f"⭐ Performance scores\n\n"
+        f"*Summaries are posted automatically after 15 playoff matches each month.*",
+        ephemeral=True
+    )
 
 
 @client.tree.command(name="clubstats", description="Show overall club statistics")
@@ -991,7 +1086,7 @@ async def playerstats(interaction: discord.Interaction, player_name: str):
                 )
                 return
 
-            # Build player stats embed
+            # Build player stats embed (page 1)
             name = player.get("name", "Unknown")
             position = player.get("favoritePosition", player.get("proPos", "N/A"))
             
@@ -1033,45 +1128,133 @@ async def playerstats(interaction: discord.Interaction, player_name: str):
             hat_tricks = get_player_hat_trick_count(interaction.guild_id, name)
             assist_hat_tricks = get_player_assist_hat_trick_count(interaction.guild_id, name)
 
-            embed = discord.Embed(
+            stats_embed = discord.Embed(
                 title=f"⚽ {name}",
                 description=f"**{club_name}** | Position: {position}",
                 color=discord.Color.green(),
             )
 
             # Just show matches played and win rate
-            embed.add_field(name="🎮 Matches", value=str(matches_played), inline=True)
-            embed.add_field(name="📈 Win %", value=f"{win_rate}%", inline=True)
-            embed.add_field(name="⭐ Avg Rating", value=f"{rating:.1f}" if rating else "N/A", inline=True)
+            stats_embed.add_field(name="🎮 Matches", value=str(matches_played), inline=True)
+            stats_embed.add_field(name="📈 Win %", value=f"{win_rate}%", inline=True)
+            stats_embed.add_field(name="⭐ Avg Rating", value=f"{rating:.1f}" if rating else "N/A", inline=True)
             
-            embed.add_field(name="⚽ Goals", value=str(goals), inline=True)
-            embed.add_field(name="🅰️ Assists", value=str(assists), inline=True)
-            embed.add_field(name="⭐ MOTM", value=str(motm), inline=True)
+            stats_embed.add_field(name="⚽ Goals", value=str(goals), inline=True)
+            stats_embed.add_field(name="🅰️ Assists", value=str(assists), inline=True)
+            stats_embed.add_field(name="⭐ MOTM", value=str(motm), inline=True)
             
             # Hat-trick stats (only show if > 0)
             if hat_tricks > 0:
-                embed.add_field(name="🎩 Hat-tricks", value=str(hat_tricks), inline=True)
+                stats_embed.add_field(name="🎩 Hat-tricks", value=str(hat_tricks), inline=True)
             if assist_hat_tricks > 0:
-                embed.add_field(name="🎯 Assist Hat-tricks", value=str(assist_hat_tricks), inline=True)
+                stats_embed.add_field(name="🎯 Assist Hat-tricks", value=str(assist_hat_tricks), inline=True)
             
-            embed.add_field(name="📊 Goals/Game", value=f"{goals_per_game:.2f}", inline=True)
-            embed.add_field(name="📊 Assists/Game", value=f"{assists_per_game:.2f}", inline=True)
-            embed.add_field(name="🎯 Pass Accuracy", value=f"{pass_success_rate}%", inline=True)
+            stats_embed.add_field(name="📊 Goals/Game", value=f"{goals_per_game:.2f}", inline=True)
+            stats_embed.add_field(name="📊 Assists/Game", value=f"{assists_per_game:.2f}", inline=True)
+            stats_embed.add_field(name="🎯 Pass Accuracy", value=f"{pass_success_rate}%", inline=True)
             
-            embed.add_field(name="🥅 Shot Accuracy", value=f"{shot_success_rate}%", inline=True)
-            embed.add_field(name="🛡️ Tackles", value=f"{tackles_made}", inline=True)
-            embed.add_field(name="🛡️ Tackle Success", value=f"{tackle_success_rate}%", inline=True)
+            stats_embed.add_field(name="🥅 Shot Accuracy", value=f"{shot_success_rate}%", inline=True)
+            stats_embed.add_field(name="🛡️ Tackles", value=f"{tackles_made}", inline=True)
+            stats_embed.add_field(name="🛡️ Tackle Success", value=f"{tackle_success_rate}%", inline=True)
             
             if clean_sheets_def > 0 or clean_sheets_gk > 0:
                 clean_sheets = clean_sheets_gk if clean_sheets_gk > 0 else clean_sheets_def
-                embed.add_field(name="🧤 Clean Sheets", value=str(clean_sheets), inline=True)
+                stats_embed.add_field(name="🧤 Clean Sheets", value=str(clean_sheets), inline=True)
             
             if red_cards > 0:
-                embed.add_field(name="🟥 Red Cards", value=str(red_cards), inline=True)
+                stats_embed.add_field(name="🟥 Red Cards", value=str(red_cards), inline=True)
 
-            embed.set_footer(text=f"Platform: {used_platform}")
+            stats_embed.set_footer(text=f"Platform: {used_platform} | Page 1/3")
 
-            await interaction.followup.send(embed=embed)
+            # Build achievements embed (page 2)
+            from database import get_player_achievement_history
+            from achievements import ACHIEVEMENTS
+
+            achievement_history = get_player_achievement_history(interaction.guild_id, name)
+            ach_embed = discord.Embed(
+                title=f"🏆 {name}'s Achievements",
+                color=discord.Color.gold(),
+            )
+            if achievement_history:
+                ach_embed.description = (
+                    f"**{len(achievement_history)}** achievement"
+                    f"{'s' if len(achievement_history) != 1 else ''} earned"
+                )
+                categorized: dict = {}
+                for ach in achievement_history:
+                    ach_id = ach["achievement_id"]
+                    if ach_id in ACHIEVEMENTS:
+                        ach_data = ACHIEVEMENTS[ach_id]
+                        cat = ach_data["category"]
+                        categorized.setdefault(cat, []).append(ach_data)
+                for cat, achs in categorized.items():
+                    ach_embed.add_field(
+                        name=cat,
+                        value="\n".join(
+                            f"{a['emoji']} **{a['name']}** — {a['description']}"
+                            for a in achs
+                        ),
+                        inline=False,
+                    )
+            else:
+                ach_embed.description = (
+                    f"No achievements earned yet. Use `/listachievements` to see "
+                    f"what's available!"
+                )
+            ach_embed.set_footer(text=f"Platform: {used_platform} | Page 2/3")
+
+            # Build stats-over-time embed (page 3) and pre-render the chart
+            from database import get_player_match_history as _get_history
+            history = _get_history(interaction.guild_id, name, limit=20)
+            chart_result = _generate_player_chart(name, history)
+
+            chart_page_files: dict = {}
+            if chart_result:
+                chart_file, chart_filename = chart_result
+                # Read bytes so the file can be recreated on demand (e.g. when
+                # the user navigates to the graph page after viewing other pages).
+                chart_file.fp.seek(0)
+                chart_raw_bytes = chart_file.fp.read()
+
+                def _make_chart_file(raw=chart_raw_bytes, fname=chart_filename):
+                    return discord.File(io.BytesIO(raw), filename=fname)
+
+                chart_page_files = {2: _make_chart_file}
+
+                total_g = sum(m["goals"] for m in history)
+                total_a = sum(m["assists"] for m in history)
+                gpg = total_g / len(history)
+                apg = total_a / len(history)
+                chart_embed = discord.Embed(
+                    title=f"📈 Stats Over Time — {name}",
+                    description=(
+                        f"**{len(history)} matches tracked** | "
+                        f"⚽ {total_g} goals ({gpg:.2f}/game) | "
+                        f"🅰️ {total_a} assists ({apg:.2f}/game)"
+                    ),
+                    color=discord.Color.blurple(),
+                )
+                chart_embed.set_image(url=f"attachment://{chart_filename}")
+                chart_embed.set_footer(
+                    text="Match data tracked since the bot was set up | Page 3/3"
+                )
+            else:
+                chart_embed = discord.Embed(
+                    title=f"📈 Stats Over Time — {name}",
+                    description=(
+                        "Not enough match history yet.\n"
+                        "The bot needs to track at least 2 matches after setup. "
+                        "Play more and the chart will appear here automatically!"
+                    ),
+                    color=discord.Color.blurple(),
+                )
+                chart_embed.set_footer(text=f"Platform: {used_platform} | Page 3/3")
+
+            pages = [stats_embed, ach_embed, chart_embed]
+            view = PaginatedEmbedView(pages, page_files=chart_page_files)
+
+            msg = await interaction.followup.send(embed=pages[0], view=view, wait=True)
+            view.message = msg
     except Exception as e:  # noqa: BLE001
         logger.error(f"Error fetching player stats: {e}", exc_info=True)
         await interaction.followup.send(
@@ -1079,9 +1262,17 @@ async def playerstats(interaction: discord.Interaction, player_name: str):
         )
 
 
-@client.tree.command(name="lastmatches", description="Show the last 5 matches played by the club")
-async def lastmatches(interaction: discord.Interaction):
-    """Display recent match history."""
+@client.tree.command(name="lastmatches", description="Show the last 10 matches played by the club")
+@app_commands.describe(match_type="Which type of matches to show (default: League)")
+@app_commands.choices(
+    match_type=[
+        app_commands.Choice(name="League 🏟️", value="leagueMatch"),
+        app_commands.Choice(name="Playoff 🏆", value="playoffMatch"),
+        app_commands.Choice(name="All match types 🔀", value="all"),
+    ]
+)
+async def lastmatches(interaction: discord.Interaction, match_type: app_commands.Choice[str] = None):
+    """Display recent match history, paginated (one match per page)."""
     await interaction.response.defer(thinking=True)
     st = get_settings(interaction.guild_id)
     if not st or not (st.get("club_id") and st.get("platform")):
@@ -1090,6 +1281,14 @@ async def lastmatches(interaction: discord.Interaction):
 
     club_id = int(st["club_id"])
     platform = st["platform"]
+
+    # Resolve the EA API match-type string and a human-readable label
+    if not match_type or match_type.value == "all":
+        ea_match_type = None
+        type_label = "All match types"
+    else:
+        ea_match_type = match_type.value
+        type_label = match_type.name
 
     try:
         async with aiohttp.ClientSession(timeout=HTTP_TIMEOUT) as session:
@@ -1103,84 +1302,97 @@ async def lastmatches(interaction: discord.Interaction):
                 club_info = {}
             club_name = club_info.get("name", "Unknown Club")
             
-            # Fetch last 5 matches
-            matches = await fetch_all_matches(session, used_platform, club_id, max_count=5)
-            
-            if not matches:
-                await interaction.followup.send("No recent matches found.", ephemeral=True)
-                return
-            
-            embed = discord.Embed(
-                title=f"📋 Recent Matches - {club_name}",
-                description=f"Last {len(matches)} league matches",
-                color=discord.Color.blue(),
+            # Fetch last 10 matches of the requested type
+            matches = await fetch_all_matches(
+                session, used_platform, club_id, max_count=10, match_type=ea_match_type
             )
             
+            if not matches:
+                await interaction.followup.send(
+                    f"No recent **{type_label}** matches found.", ephemeral=True
+                )
+                return
+            
+            # Build one page per match with full player breakdown
+            pages = []
             for i, match in enumerate(matches, 1):
-                # Get our club's data
                 clubs = match.get("clubs", {})
                 our_club = clubs.get(str(club_id), {})
-                
-                # Find opponent
+
                 opponent_id = [cid for cid in clubs.keys() if str(cid) != str(club_id)]
                 opponent_club = clubs.get(opponent_id[0], {}) if opponent_id else {}
                 opponent_name = opponent_club.get("details", {}).get("name", "Unknown")
-                
-                # Scores
+
                 our_score = our_club.get("score", "?")
                 opp_score = opponent_club.get("score", "?")
-                
-                # Result
+
                 result = our_club.get("result", "")
                 if result == "1":
                     result_emoji = "✅ Win"
-                    result_color = "🟢"
+                    color = 0x2ecc71
                 elif result == "2":
                     result_emoji = "❌ Loss"
-                    result_color = "🔴"
+                    color = 0xe74c3c
                 elif result == "3":
                     result_emoji = "🤝 Draw"
-                    result_color = "🟡"
+                    color = 0xf1c40f
                 else:
                     result_emoji = "❓"
-                    result_color = "⚪"
-                
-                # Timestamp
-                timestamp = match.get("timestamp", 0)
+                    color = 0x95a5a6
+
                 time_ago = match.get("timeAgo", {})
-                time_str = f"{time_ago.get('number', '?')} {time_ago.get('unit', 'ago')}" if time_ago else "?"
-                
-                # Find highest rated player (MOTM or highest rating)
-                # Players are at top level: match.players[clubId][playerId]
+                time_str = (
+                    f"{time_ago.get('number', '?')} {time_ago.get('unit', 'ago')}"
+                    if time_ago else "?"
+                )
+
+                embed = discord.Embed(
+                    title=f"Match {i}/{len(matches)} — {result_emoji} {our_score}–{opp_score}",
+                    description=f"**{club_name}** vs **{opponent_name}** | {time_str} ago",
+                    color=color,
+                )
+
+                # Player stats for this match
                 all_players = match.get("players", {})
                 club_players = all_players.get(str(club_id), {})
-                best_player = None
-                best_rating = 0.0
-                
+                player_stats = []
                 for player_id, player_data in club_players.items():
                     if isinstance(player_data, dict):
-                        rating = float(player_data.get("rating", 0) or 0)
-                        # Check if MOTM
-                        if int(player_data.get("mom", 0) or 0) == 1:
-                            best_player = player_data.get("playername", "Unknown")
-                            best_rating = rating
-                            break  # MOTM is always best
-                        elif rating > best_rating:
-                            best_rating = rating
-                            best_player = player_data.get("playername", "Unknown")
-                
-                match_info = f"{result_emoji}: **{our_score}-{opp_score}** vs {opponent_name}"
-                if best_player:
-                    match_info += f"\n⭐ **{best_player}** ({best_rating:.1f} rating)"
-                
-                embed.add_field(
-                    name=f"{result_color} Match {i} - {time_str} ago",
-                    value=match_info,
-                    inline=False
+                        player_stats.append({
+                            "name": player_data.get("playername", "Unknown"),
+                            "goals": int(player_data.get("goals", 0) or 0),
+                            "assists": int(player_data.get("assists", 0) or 0),
+                            "rating": float(player_data.get("rating", 0) or 0),
+                            "mom": int(player_data.get("mom", 0) or 0),
+                        })
+
+                # Sort by rating descending
+                player_stats.sort(key=lambda p: p["rating"], reverse=True)
+
+                if player_stats:
+                    lines = []
+                    for p in player_stats:
+                        motm_tag = " 🏅" if p["mom"] == 1 else ""
+                        g = f"⚽{p['goals']}" if p["goals"] > 0 else ""
+                        a = f"🅰️{p['assists']}" if p["assists"] > 0 else ""
+                        extras = " ".join(filter(None, [g, a]))
+                        line = f"**{p['name']}** — ⭐{p['rating']:.1f}{motm_tag}"
+                        if extras:
+                            line += f"  {extras}"
+                        lines.append(line)
+                    embed.add_field(
+                        name="👥 Player Ratings",
+                        value="\n".join(lines),
+                        inline=False,
+                    )
+
+                embed.set_footer(
+                    text=f"Platform: {used_platform} | {type_label} | Page {i}/{len(matches)}"
                 )
+                pages.append(embed)
             
-            embed.set_footer(text=f"Platform: {used_platform}")
-            await interaction.followup.send(embed=embed)
+            view = PaginatedEmbedView(pages)
+            view.message = await interaction.followup.send(embed=pages[0], view=view, wait=True)
             
     except Exception as e:
         logger.error(f"Error fetching matches: {e}", exc_info=True)
@@ -1334,28 +1546,41 @@ async def leaderboard(interaction: discord.Interaction, category: app_commands.C
                 title = "Leaderboard"
                 format_fn = lambda m: ""
 
-            # Build leaderboard embed
-            embed = discord.Embed(
-                title=f"{title}",
-                description=f"**{club_name}**",
-                color=discord.Color.gold(),
-            )
-
-            # Show top 10
+            # Build paginated leaderboard (10 players per page)
             medals = ["🥇", "🥈", "🥉"]
-            for i, m in enumerate(sorted_members[:10]):
-                rank = medals[i] if i < 3 else f"{i + 1}."
-                name = m.get("name", "Unknown")
-                stat_text = format_fn(m)
-                embed.add_field(
-                    name=f"{rank} {name}",
-                    value=stat_text,
-                    inline=False
+            page_size = 10
+            total_players = len(sorted_members)
+            total_pages = max(1, (total_players + page_size - 1) // page_size)
+
+            pages = []
+            for page_num in range(total_pages):
+                start = page_num * page_size
+                page_members = sorted_members[start:start + page_size]
+
+                embed = discord.Embed(
+                    title=f"{title}",
+                    description=f"**{club_name}**",
+                    color=discord.Color.gold(),
                 )
 
-            embed.set_footer(text=f"Platform: {used_platform} | Showing top {min(10, len(sorted_members))} of {len(sorted_members)} players")
+                for i, m in enumerate(page_members):
+                    global_rank = start + i
+                    rank = medals[global_rank] if global_rank < 3 else f"{global_rank + 1}."
+                    name = m.get("name", "Unknown")
+                    stat_text = format_fn(m)
+                    embed.add_field(
+                        name=f"{rank} {name}",
+                        value=stat_text,
+                        inline=False
+                    )
 
-            await interaction.followup.send(embed=embed)
+                embed.set_footer(
+                    text=f"Platform: {used_platform} | Page {page_num + 1}/{total_pages} | {total_players} players"
+                )
+                pages.append(embed)
+
+            view = PaginatedEmbedView(pages)
+            view.message = await interaction.followup.send(embed=pages[0], view=view, wait=True)
     except Exception as e:  # noqa: BLE001
         logger.error(f"Error fetching leaderboard: {e}", exc_info=True)
         await interaction.followup.send(
@@ -1432,7 +1657,7 @@ async def achievements_cmd(interaction: discord.Interaction, player_name: str):
 
 @client.tree.command(name="listachievements", description="List all available achievements")
 async def listachievements(interaction: discord.Interaction):
-    """Display all available achievements that can be earned."""
+    """Display all available achievements that can be earned, paginated by category."""
     await interaction.response.defer(thinking=True)
     logger.info(f"[Command: listachievements] User {interaction.user} requesting achievement list")
     
@@ -1440,30 +1665,260 @@ async def listachievements(interaction: discord.Interaction):
         from achievements import get_all_achievements_list
         
         categorized = get_all_achievements_list()
-        
-        embed = discord.Embed(
-            title="🏆 All Available Achievements",
-            description=f"Earn these special achievements through exceptional performance!",
-            color=discord.Color.gold(),
-        )
-        
-        # Add fields for each category
-        for category, achievements_list in categorized.items():
+        total_count = sum(len(achs) for achs in categorized.values())
+        categories = list(categorized.items())
+
+        # Build one embed per category so each page stays focused
+        pages = []
+        for page_num, (category, achievements_list) in enumerate(categories, 1):
             ach_text = "\n".join([
-                f"{ach['emoji']} **{ach['name']}** - {ach['description']}"
+                f"{ach['emoji']} **{ach['name']}** — {ach['description']}"
                 for ach in achievements_list
             ])
-            embed.add_field(name=category, value=ach_text, inline=False)
-        
-        total_count = sum(len(achievements_list) for achievements_list in categorized.values())
-        embed.set_footer(text=f"Total: {total_count} achievements available")
-        
-        await interaction.followup.send(embed=embed)
+            embed = discord.Embed(
+                title=f"🏆 Achievements — {category}",
+                description=ach_text,
+                color=discord.Color.gold(),
+            )
+            embed.set_footer(
+                text=f"Page {page_num}/{len(categories)} | {total_count} achievements total"
+            )
+            pages.append(embed)
+
+        view = PaginatedEmbedView(pages)
+        view.message = await interaction.followup.send(embed=pages[0], view=view, wait=True)
         
     except Exception as e:
         logger.error(f"Error listing achievements: {e}", exc_info=True)
         await interaction.followup.send(
             f"Could not list achievements right now. Error: {e}", ephemeral=True
+        )
+
+
+@client.tree.command(name="lastperformance", description="Show a player's performance over their last 10 matches")
+@app_commands.describe(
+    player_name="The name of the player to look up",
+    match_type="Which type of matches to show (default: League)",
+)
+@app_commands.choices(
+    match_type=[
+        app_commands.Choice(name="League 🏟️", value="leagueMatch"),
+        app_commands.Choice(name="Playoff 🏆", value="playoffMatch"),
+        app_commands.Choice(name="All match types 🔀", value="all"),
+    ]
+)
+@app_commands.autocomplete(player_name=player_name_autocomplete)
+async def lastperformance(interaction: discord.Interaction, player_name: str, match_type: app_commands.Choice[str] = None):
+    """
+    Command: /lastperformance
+    Shows detailed per-match stats for a player's last 10 matches fetched from the EA API.
+    Displays goals, assists, rating, and result for each match.
+    """
+    await interaction.response.defer(thinking=True)
+    logger.info(f"[Command: lastperformance] User {interaction.user} in guild {interaction.guild_id} requesting last performance for {player_name}")
+
+    st = get_settings(interaction.guild_id)
+    if not st or not (st.get("club_id") and st.get("platform")):
+        await interaction.followup.send("Set a club first with `/setclub`.", ephemeral=True)
+        return
+
+    club_id = int(st["club_id"])
+    platform = st["platform"]
+
+    # Resolve the EA API match-type string and a human-readable label
+    if not match_type or match_type.value == "all":
+        ea_match_type = None
+        type_label = "All match types"
+    else:
+        ea_match_type = match_type.value
+        type_label = match_type.name
+
+    try:
+        async with aiohttp.ClientSession(timeout=HTTP_TIMEOUT) as session:
+            await warmup_session(session)
+
+            info, used_platform = await fetch_club_info(session, platform, club_id)
+            if isinstance(info, list):
+                club_info = next(
+                    (entry for entry in info if str(entry.get("clubId")) == str(club_id)),
+                    {},
+                )
+            elif isinstance(info, dict):
+                club_info = info.get(str(club_id), {})
+            else:
+                club_info = {}
+            club_name = club_info.get("name", "Unknown Club")
+
+            matches = await fetch_all_matches(
+                session, used_platform, club_id, max_count=10, match_type=ea_match_type
+            )
+
+            if not matches:
+                await interaction.followup.send(
+                    f"No recent **{type_label}** matches found.", ephemeral=True
+                )
+                return
+
+            # Collect per-match stats for the requested player
+            player_match_rows = []
+            for match in matches:
+                clubs = match.get("clubs", {})
+                our_club = clubs.get(str(club_id), {})
+                result_code = our_club.get("result", "")
+                if result_code == "1":
+                    result_emoji = "✅"
+                elif result_code == "2":
+                    result_emoji = "❌"
+                elif result_code == "3":
+                    result_emoji = "🤝"
+                else:
+                    result_emoji = "❓"
+
+                opponent_ids = [cid for cid in clubs.keys() if str(cid) != str(club_id)]
+                opponent_club = clubs.get(opponent_ids[0], {}) if opponent_ids else {}
+                our_score = our_club.get("score", "?")
+                opp_score = opponent_club.get("score", "?")
+
+                all_players = match.get("players", {})
+                club_players = all_players.get(str(club_id), {})
+
+                # Find this player in the match
+                pdata = None
+                for pid, pd in club_players.items():
+                    if isinstance(pd, dict) and pd.get("playername", "").lower() == player_name.lower():
+                        pdata = pd
+                        break
+
+                if pdata is None:
+                    continue  # Player didn't play in this match
+
+                goals = int(pdata.get("goals", 0) or 0)
+                assists = int(pdata.get("assists", 0) or 0)
+                rating = float(pdata.get("rating", 0) or 0)
+                is_motm = int(pdata.get("mom", 0) or 0) == 1
+
+                time_ago = match.get("timeAgo", {})
+                time_str = f"{time_ago.get('number', '?')} {time_ago.get('unit', '')}" if time_ago else "?"
+
+                player_match_rows.append({
+                    "result_emoji": result_emoji,
+                    "score": f"{our_score}-{opp_score}",
+                    "goals": goals,
+                    "assists": assists,
+                    "rating": rating,
+                    "motm": is_motm,
+                    "time_str": time_str,
+                })
+
+            if not player_match_rows:
+                await interaction.followup.send(
+                    f"❌ **{player_name}** didn't appear in the last {len(matches)} **{type_label}** matches.\n"
+                    f"Make sure the name is correct or try `/clubstats` first to refresh the player cache.",
+                    ephemeral=True
+                )
+                return
+
+            # Aggregate summary
+            total_goals = sum(r["goals"] for r in player_match_rows)
+            total_assists = sum(r["assists"] for r in player_match_rows)
+            avg_rating = sum(r["rating"] for r in player_match_rows) / len(player_match_rows)
+            wins = sum(1 for r in player_match_rows if r["result_emoji"] == "✅")
+            losses = sum(1 for r in player_match_rows if r["result_emoji"] == "❌")
+            draws = sum(1 for r in player_match_rows if r["result_emoji"] == "🤝")
+            motm_count = sum(1 for r in player_match_rows if r["motm"])
+
+            embed = discord.Embed(
+                title=f"📊 {player_name} — Last {len(player_match_rows)} Matches",
+                description=f"**{club_name}** | {type_label} | Summary: {wins}W {losses}L {draws}D",
+                color=discord.Color.green(),
+            )
+
+            embed.add_field(name="⚽ Goals", value=str(total_goals), inline=True)
+            embed.add_field(name="🅰️ Assists", value=str(total_assists), inline=True)
+            embed.add_field(name="⭐ Avg Rating", value=f"{avg_rating:.2f}", inline=True)
+            if motm_count:
+                embed.add_field(name="🏅 MOTM", value=str(motm_count), inline=True)
+
+            # Per-match breakdown (most recent first, up to 10)
+            lines = []
+            for i, r in enumerate(player_match_rows, 1):
+                motm_tag = " 🏅" if r["motm"] else ""
+                lines.append(
+                    f"{i}. {r['result_emoji']} `{r['score']}` "
+                    f"⚽{r['goals']} 🅰️{r['assists']} ⭐{r['rating']:.1f}{motm_tag} "
+                    f"— {r['time_str']} ago"
+                )
+
+            embed.add_field(
+                name="Match Breakdown (most recent first)",
+                value="\n".join(lines),
+                inline=False,
+            )
+            embed.set_footer(text=f"Platform: {used_platform} | {type_label}")
+            await interaction.followup.send(embed=embed)
+
+    except Exception as e:
+        logger.error(f"Error fetching last performance: {e}", exc_info=True)
+        await interaction.followup.send(
+            f"Could not fetch performance data right now. Error: {e}", ephemeral=True
+        )
+
+
+@client.tree.command(name="statsovertime", description="Visualize a player's goals and assists per game over recent matches")
+@app_commands.describe(player_name="The name of the player to visualize")
+@app_commands.autocomplete(player_name=player_name_autocomplete)
+async def statsovertime(interaction: discord.Interaction, player_name: str):
+    """
+    Command: /statsovertime
+    Generates a chart showing a player's goals and assists trends over their
+    recorded match history. Uses locally stored match data tracked by the bot.
+    """
+    await interaction.response.defer(thinking=True)
+    logger.info(f"[Command: statsovertime] User {interaction.user} in guild {interaction.guild_id} requesting stats over time for {player_name}")
+
+    st = get_settings(interaction.guild_id)
+    if not st or not st.get("club_id"):
+        await interaction.followup.send("Set a club first with `/setclub`.", ephemeral=True)
+        return
+
+    try:
+        from database import get_player_match_history
+
+        history = get_player_match_history(interaction.guild_id, player_name, limit=20)
+
+        chart_result = _generate_player_chart(player_name, history)
+        if not chart_result:
+            await interaction.followup.send(
+                f"❌ Not enough match history for **{player_name}** yet.\n"
+                f"The bot needs to track at least 2 matches after setup. "
+                f"Play more matches and the data will accumulate automatically!",
+                ephemeral=True
+            )
+            return
+
+        chart_file, chart_filename = chart_result
+        total_goals = sum(m["goals"] for m in history)
+        total_assists = sum(m["assists"] for m in history)
+        final_gpg = total_goals / len(history)
+        final_apg = total_assists / len(history)
+
+        embed = discord.Embed(
+            title=f"📈 Stats Over Time — {player_name}",
+            description=(
+                f"**{len(history)} matches tracked** | "
+                f"⚽ {total_goals} goals ({final_gpg:.2f}/game) | "
+                f"🅰️ {total_assists} assists ({final_apg:.2f}/game)"
+            ),
+            color=discord.Color.blurple(),
+        )
+        embed.set_image(url=f"attachment://{chart_filename}")
+        embed.set_footer(text="Match data tracked since the bot was set up for this server.")
+        await interaction.followup.send(embed=embed, file=chart_file)
+
+    except Exception as e:
+        logger.error(f"Error generating stats over time chart: {e}", exc_info=True)
+        await interaction.followup.send(
+            f"Could not generate chart right now. Error: {e}", ephemeral=True
         )
 
 
