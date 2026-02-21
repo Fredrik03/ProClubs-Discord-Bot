@@ -2,7 +2,80 @@
 Discord embed builders for match results and stats.
 """
 import discord
+from collections.abc import Callable
 from datetime import datetime, timezone
+
+
+class PaginatedEmbedView(discord.ui.View):
+    """
+    A Discord View that adds Previous / Next buttons to navigate
+    through a list of pre-built embeds.
+
+    Usage::
+
+        pages = [embed1, embed2, embed3]
+        view = PaginatedEmbedView(pages)
+        # ``wait=True`` returns the sent Message object so the view can
+        # edit it on timeout to visually disable the buttons.
+        msg = await interaction.followup.send(embed=pages[0], view=view, wait=True)
+        view.message = msg
+    """
+
+    def __init__(
+        self,
+        embeds: list[discord.Embed],
+        *,
+        timeout: float = 180.0,
+        page_files: dict[int, Callable[[], discord.File | None]] | None = None,
+    ):
+        super().__init__(timeout=timeout)
+        if not embeds:
+            raise ValueError("embeds must not be empty")
+        self.embeds = embeds
+        self.current_page = 0
+        self.message: discord.Message | None = None
+        self.page_files: dict[int, Callable[[], discord.File | None]] = page_files or {}
+        self._update_buttons()
+
+    def _update_buttons(self) -> None:
+        """Disable navigation buttons at the first / last page."""
+        self.prev_button.disabled = self.current_page == 0
+        self.next_button.disabled = self.current_page == len(self.embeds) - 1
+
+    def _build_edit_kwargs(self) -> dict:
+        """Build keyword arguments for edit_message for the current page."""
+        factory = self.page_files.get(self.current_page)
+        attachments: list = []
+        if factory:
+            file = factory()
+            if file:
+                attachments = [file]
+        return {"embed": self.embeds[self.current_page], "view": self, "attachments": attachments}
+
+    @discord.ui.button(label="◀ Previous", style=discord.ButtonStyle.secondary)
+    async def prev_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_page -= 1
+        self._update_buttons()
+        await interaction.response.edit_message(**self._build_edit_kwargs())
+
+    @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.secondary)
+    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_page += 1
+        self._update_buttons()
+        await interaction.response.edit_message(**self._build_edit_kwargs())
+
+    async def on_timeout(self) -> None:
+        """Disable all buttons when the view times out (3 minutes by default)."""
+        for child in self.children:
+            child.disabled = True
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException) as exc:
+                import logging
+                logging.getLogger("ProClubsBot").warning(
+                    "PaginatedEmbedView.on_timeout: could not edit message to disable buttons: %s", exc
+                )
 
 
 def utc_to_str(ts: int) -> str:
