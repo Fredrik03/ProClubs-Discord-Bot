@@ -12,7 +12,11 @@ ACHIEVEMENT CATEGORIES:
 4. Team Performance: Team-based achievements
 5. Career Milestones: Long-term career accomplishments
 
+<<<<<<< HEAD
 Total: 33 unique achievements available.
+=======
+Total: 19 unique achievements available.
+>>>>>>> origin/main
 Each achievement is only announced once per player.
 """
 import logging
@@ -179,6 +183,7 @@ ACHIEVEMENTS = {
         "description": "Beat a team with 500+ skill rating difference",
         "category": "Team Performance"
     },
+<<<<<<< HEAD
     "nil_nil": {
         "name": "Nil-Nil Nightmare",
         "emoji": "😴",
@@ -203,6 +208,8 @@ ACHIEVEMENTS = {
         "description": "Draw 3 matches in a row",
         "category": "Streak & Consistency"
     },
+=======
+>>>>>>> origin/main
 
     # Match Performance (additional)
     "double_trouble": {
@@ -312,6 +319,7 @@ def check_achievements(guild_id: int, player_name: str, stats: dict, match_data:
                 **ACHIEVEMENTS["the_wall"]
             })
     
+<<<<<<< HEAD
     # Century - 100 career goals
     if goals >= 100:
         if not has_achievement_been_earned(guild_id, player_name, "century"):
@@ -345,6 +353,8 @@ def check_achievements(guild_id: int, player_name: str, stats: dict, match_data:
                 **ACHIEVEMENTS["red_mist"]
             })
 
+=======
+>>>>>>> origin/main
     # Career Milestone Achievements
     if matches_played >= 50 and not has_achievement_been_earned(guild_id, player_name, "iron_man"):
         achievements.append({
@@ -418,6 +428,7 @@ def check_match_achievements(guild_id: int, player_name: str, match_data: dict) 
             **ACHIEVEMENTS["perfect_10"]
         })
     
+<<<<<<< HEAD
     # Brace - exactly 2 goals
     if match_goals == 2 and not has_achievement_been_earned(guild_id, player_name, "brace"):
         achievements.append({
@@ -448,6 +459,8 @@ def check_match_achievements(guild_id: int, player_name: str, match_data: dict) 
                 **ACHIEVEMENTS["ghost"]
             })
 
+=======
+>>>>>>> origin/main
     # Sniper - 5+ goals in a single match
     if match_goals >= 5 and not has_achievement_been_earned(guild_id, player_name, "sniper"):
         achievements.append({
@@ -746,6 +759,7 @@ def check_historical_achievements(guild_id: int, player_name: str, stats: dict) 
             })
             record_achievement(guild_id, player_name, "the_wall")
     
+<<<<<<< HEAD
     # Century - 100 career goals
     if goals >= 100:
         if not has_achievement_been_earned(guild_id, player_name, "century"):
@@ -783,6 +797,8 @@ def check_historical_achievements(guild_id: int, player_name: str, stats: dict) 
             })
             record_achievement(guild_id, player_name, "red_mist")
 
+=======
+>>>>>>> origin/main
     # Career Milestone Achievements
     if matches_played >= 50 and not has_achievement_been_earned(guild_id, player_name, "iron_man"):
         achievements.append({

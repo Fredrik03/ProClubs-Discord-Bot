@@ -94,8 +94,12 @@ from monthly import (
 )
 from utils.ea_api import (
     platform_from_choice, parse_club_id_from_any, warmup_session,
+<<<<<<< HEAD
     fetch_club_info, fetch_latest_match, fetch_latest_playoff_match,
     fetch_json, HTTP_TIMEOUT, EAApiForbiddenError,
+=======
+    fetch_club_info, fetch_latest_match, fetch_json, HTTP_TIMEOUT, EAApiForbiddenError,
+>>>>>>> origin/main
     fetch_all_matches, calculate_player_wld
 )
 from utils.embeds import build_match_embed, utc_to_str, PaginatedEmbedView
@@ -519,6 +523,11 @@ def _generate_player_chart(player_name: str, history: list) -> tuple | None:
     if len(history) < MIN_CHART_DATA_POINTS:
         return None
 
+<<<<<<< HEAD
+=======
+    import io
+
+>>>>>>> origin/main
     match_nums = list(range(1, len(history) + 1))
     goals = [m["goals"] for m in history]
     assists = [m["assists"] for m in history]
