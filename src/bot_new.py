@@ -528,10 +528,8 @@ def _generate_player_chart(player_name: str, history: list) -> tuple | None:
     cum_apg = [sum(assists[:i + 1]) / (i + 1) for i in range(len(assists))]
 
     has_ratings = any(r > 0 for r in ratings)
-    nrows = 3 if has_ratings else 2
-    fig, axes = plt.subplots(nrows, 1, figsize=(10, 4 * nrows), sharex=True)
-    ax1, ax2 = axes[0], axes[1]
-    ax3 = axes[2] if has_ratings else None
+    fig, axes = plt.subplots(3, 1, figsize=(10, 12), sharex=True)
+    ax1, ax2, ax3 = axes[0], axes[1], axes[2]
 
     fig.patch.set_facecolor("#2f3136")
     for ax in axes:
@@ -558,20 +556,27 @@ def _generate_player_chart(player_name: str, history: list) -> tuple | None:
     ax2.legend(facecolor="#2f3136", labelcolor="white")
     ax2.yaxis.set_major_locator(mticker.MaxNLocator(integer=True))
 
-    if ax3 is not None:
+    if has_ratings:
         valid_ratings = [r for r in ratings if r > 0]
         avg_r = sum(valid_ratings) / len(valid_ratings) if valid_ratings else 0
         ax3.plot(match_nums, ratings, color="#f1c40f", linewidth=2, marker="o",
                  markersize=4, label="Rating (match)")
         ax3.axhline(avg_r, color="#f39c12", linewidth=1.5, linestyle="--",
                     label=f"Avg {avg_r:.2f}")
-        ax3.set_xlabel("Match #", color="white")
-        ax3.set_ylabel("Rating", color="white")
-        ax3.set_title(f"Rating Over Time — {player_name}", color="white")
-        ax3.legend(facecolor="#2f3136", labelcolor="white")
         ax3.set_ylim(0, 10.5)
+        ax3.legend(facecolor="#2f3136", labelcolor="white")
     else:
-        ax2.set_xlabel("Match #", color="white")
+        ax3.text(
+            0.5, 0.5,
+            "Rating data not yet available\nPlay more matches for this to populate",
+            ha="center", va="center", color="#aaaaaa", fontsize=11,
+            transform=ax3.transAxes,
+        )
+        ax3.set_ylim(0, 10.5)
+
+    ax3.set_xlabel("Match #", color="white")
+    ax3.set_ylabel("Rating", color="white")
+    ax3.set_title(f"Rating Over Time — {player_name}", color="white")
 
     plt.tight_layout(pad=2.0)
 
