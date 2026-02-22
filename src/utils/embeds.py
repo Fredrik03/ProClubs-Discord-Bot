@@ -181,16 +181,26 @@ def build_match_embed(club_id: int, platform: str, match: dict, match_type: str,
         
         # Sort by goals, then assists, then rating
         player_stats.sort(key=lambda x: (x["goals"], x["assists"], x["rating"]), reverse=True)
-        
-        # Goal scorers
+
+        # Goal scorers (with assists inline)
         scorers = [p for p in player_stats if p["goals"] > 0]
         if scorers:
             scorers_text = "\n".join([
-                f"⚽ **{p['name']}** - {p['goals']}G" + (f" {p['assists']}A" if p['assists'] > 0 else "")
-                for p in scorers[:5]
+                f"⚽ **{p['name']}** {'x' + str(p['goals']) if p['goals'] > 1 else ''}"
+                + (f" (+{p['assists']}A)" if p['assists'] > 0 else "")
+                for p in scorers
             ])
             embed.add_field(name="⚽ Goal Scorers", value=scorers_text, inline=False)
-        
+
+        # Pure assisters (assisted but didn't score)
+        pure_assisters = [p for p in player_stats if p["assists"] > 0 and p["goals"] == 0]
+        if pure_assisters:
+            assist_text = "\n".join([
+                f"🅰️ **{p['name']}** {'x' + str(p['assists']) if p['assists'] > 1 else ''}"
+                for p in pure_assisters
+            ])
+            embed.add_field(name="🅰️ Assisters", value=assist_text, inline=False)
+
         # Man of the Match
         if motm_player:
             embed.add_field(
@@ -198,15 +208,16 @@ def build_match_embed(club_id: int, platform: str, match: dict, match_type: str,
                 value=f"**{motm_player[0]}** ({motm_player[1]:.1f} rating)",
                 inline=False
             )
-        
-        # Top rated players (show top 3)
+
+        # All player ratings sorted desc
         player_stats.sort(key=lambda x: x["rating"], reverse=True)
-        top_rated_text = "\n".join([
-            f"{'⭐' if p['mom'] == 1 else '📊'} **{p['name']}**: {p['rating']:.1f}"
-            for p in player_stats[:3] if p['rating'] > 0
-        ])
-        if top_rated_text:
-            embed.add_field(name="📊 Top Ratings", value=top_rated_text, inline=True)
+        rated = [p for p in player_stats if p['rating'] > 0]
+        if rated:
+            ratings_text = "\n".join([
+                f"{'⭐' if p['mom'] == 1 else '·'} **{p['name']}** {p['rating']:.1f}"
+                for p in rated
+            ])
+            embed.add_field(name="📊 Player Ratings", value=ratings_text, inline=True)
         
         # Aggregate stats from match data
         aggregate = match.get("aggregate", {})

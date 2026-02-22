@@ -68,16 +68,43 @@ async def announce_milestones(client, guild_id: int, player_name: str, milestone
         for milestone in milestones:
             # Record milestone FIRST to prevent duplicates
             record_milestone(guild_id, player_name, milestone["type"], milestone["value"])
-            
-            # Create celebratory embed
+
+            # Pick flavour text based on milestone size
+            value = milestone["value"]
+            if value >= 500:
+                tier_bar = "🔶🔶🔶🔶🔶"
+                tier_label = "LEGENDARY"
+            elif value >= 250:
+                tier_bar = "🟣🟣🟣🟣🟣"
+                tier_label = "EPIC"
+            elif value >= 100:
+                tier_bar = "🟡🟡🟡🟡🟡"
+                tier_label = "ELITE"
+            elif value >= 50:
+                tier_bar = "🔵🔵🔵🔵⬜"
+                tier_label = "IMPRESSIVE"
+            elif value >= 25:
+                tier_bar = "🔵🔵🔵⬜⬜"
+                tier_label = "SOLID"
+            elif value >= 10:
+                tier_bar = "🔵🔵⬜⬜⬜"
+                tier_label = "GROWING"
+            else:
+                tier_bar = "🔵⬜⬜⬜⬜"
+                tier_label = "FIRST STEP"
+
             embed = discord.Embed(
-                title=f"🎉 Milestone Achieved! 🎉",
-                description=f"**{player_name}** has reached **{milestone['value']} {milestone['label']}**!",
+                title=f"🏆 MILESTONE UNLOCKED — {tier_label}",
+                description=(
+                    f"## {milestone['emoji']} {value} {milestone['label'].upper()}\n"
+                    f"**{player_name}** has reached this milestone!\n\n"
+                    f"{tier_bar}"
+                ),
                 color=discord.Color.gold(),
-                timestamp=datetime.now(timezone.utc)
+                timestamp=datetime.now(timezone.utc),
             )
-            embed.set_footer(text=f"{milestone['emoji']} Keep up the great work!")
-            
+            embed.set_footer(text="Keep grinding — the next milestone awaits!")
+
             await channel.send(embed=embed)
             
             logger.info(f"Announced milestone: {player_name} - {milestone['value']} {milestone['type']}")

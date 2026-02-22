@@ -81,7 +81,8 @@ from database import (
     update_player_match_history, is_player_initialized, mark_player_initialized,
     get_player_hat_trick_count, get_player_assist_hat_trick_count,
     get_all_players_hat_trick_stats, set_last_playoff_match_id,
-    get_monthly_stats
+    get_monthly_stats, get_player_dominant_position,
+    get_potm_history, get_player_recent_goals_assists,
 )
 from milestones import check_milestones, announce_milestones
 from achievements import (
@@ -413,26 +414,26 @@ class ProClubsBot(discord.Client):
                                 if isinstance(pdata, dict) and pdata.get("playername", "").lower() == player_name.lower():
                                     match_goals = int(pdata.get("goals", 0) or 0)
                                     match_assists = int(pdata.get("assists", 0) or 0)
-                                    
+                                    match_rating = float(pdata.get("rating", 0) or 0)
+
                                     # Extract position played in this match
                                     # Check various possible field names for position
-                                    position = (pdata.get("pos") or pdata.get("position") or 
+                                    position = (pdata.get("pos") or pdata.get("position") or
                                                pdata.get("posSorted") or pdata.get("positionSorted") or
                                                member.get("favoritePosition") or "Unknown")
-                                    
+
                                     # Debug logging for ANY position investigation
-                                    # This helps us understand if EA API separates AI stats from Pro stats
                                     if str(position).upper() == "ANY" or str(position) == "28":
                                         logger.info(f"[ANY Position Debug] Player: {player_name}, Position: {position}, Goals: {match_goals}, Assists: {match_assists}")
                                         logger.debug(f"[ANY Position Debug] Full player data: {pdata}")
-                                        # Check for fields that might indicate AI vs Pro
                                         vproattr = pdata.get("vproattr")
                                         if vproattr:
                                             logger.debug(f"[ANY Position Debug] vproattr present: {vproattr}")
-                                    
+
                                     update_player_match_history(
                                         guild_id, player_name, str(match_id),
-                                        match_goals, match_assists, clean_sheet, position, match_result
+                                        match_goals, match_assists, clean_sheet, position, match_result,
+                                        rating=match_rating,
                                     )
                                     break
                     except Exception as milestone_error:
@@ -511,8 +512,7 @@ client = ProClubsBot()
 
 def _generate_player_chart(player_name: str, history: list) -> tuple | None:
     """
-    Render a goals/assists-over-time chart for *player_name* using *history*
-    (list of dicts with "goals" and "assists" keys).
+    Render a goals/assists/rating-over-time chart for *player_name* using *history*.
 
     Returns a ``(discord.File, filename)`` tuple, or ``None`` when there are
     fewer than ``MIN_CHART_DATA_POINTS`` data-points.
@@ -523,12 +523,18 @@ def _generate_player_chart(player_name: str, history: list) -> tuple | None:
     match_nums = list(range(1, len(history) + 1))
     goals = [m["goals"] for m in history]
     assists = [m["assists"] for m in history]
+    ratings = [m.get("rating", 0.0) for m in history]
     cum_gpg = [sum(goals[:i + 1]) / (i + 1) for i in range(len(goals))]
     cum_apg = [sum(assists[:i + 1]) / (i + 1) for i in range(len(assists))]
 
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 7), sharex=True)
+    has_ratings = any(r > 0 for r in ratings)
+    nrows = 3 if has_ratings else 2
+    fig, axes = plt.subplots(nrows, 1, figsize=(10, 4 * nrows), sharex=True)
+    ax1, ax2 = axes[0], axes[1]
+    ax3 = axes[2] if has_ratings else None
+
     fig.patch.set_facecolor("#2f3136")
-    for ax in (ax1, ax2):
+    for ax in axes:
         ax.set_facecolor("#36393f")
         ax.tick_params(colors="white")
         ax.spines[:].set_color("#555")
@@ -538,7 +544,7 @@ def _generate_player_chart(player_name: str, history: list) -> tuple | None:
 
     ax1.bar(match_nums, goals, color="#e74c3c", alpha=0.7, label="Goals (match)")
     ax1.plot(match_nums, cum_gpg, color="#ff9966", linewidth=2, marker="o",
-             markersize=4, label="Goals/game (cumulative avg)")
+             markersize=4, label="Goals/game (avg)")
     ax1.set_ylabel("Goals", color="white")
     ax1.set_title(f"Goals Over Time — {player_name}", color="white")
     ax1.legend(facecolor="#2f3136", labelcolor="white")
@@ -546,12 +552,26 @@ def _generate_player_chart(player_name: str, history: list) -> tuple | None:
 
     ax2.bar(match_nums, assists, color="#3498db", alpha=0.7, label="Assists (match)")
     ax2.plot(match_nums, cum_apg, color="#66ccff", linewidth=2, marker="o",
-             markersize=4, label="Assists/game (cumulative avg)")
-    ax2.set_xlabel("Match #", color="white")
+             markersize=4, label="Assists/game (avg)")
     ax2.set_ylabel("Assists", color="white")
     ax2.set_title(f"Assists Over Time — {player_name}", color="white")
     ax2.legend(facecolor="#2f3136", labelcolor="white")
     ax2.yaxis.set_major_locator(mticker.MaxNLocator(integer=True))
+
+    if ax3 is not None:
+        valid_ratings = [r for r in ratings if r > 0]
+        avg_r = sum(valid_ratings) / len(valid_ratings) if valid_ratings else 0
+        ax3.plot(match_nums, ratings, color="#f1c40f", linewidth=2, marker="o",
+                 markersize=4, label="Rating (match)")
+        ax3.axhline(avg_r, color="#f39c12", linewidth=1.5, linestyle="--",
+                    label=f"Avg {avg_r:.2f}")
+        ax3.set_xlabel("Match #", color="white")
+        ax3.set_ylabel("Rating", color="white")
+        ax3.set_title(f"Rating Over Time — {player_name}", color="white")
+        ax3.legend(facecolor="#2f3136", labelcolor="white")
+        ax3.set_ylim(0, 10.5)
+    else:
+        ax2.set_xlabel("Match #", color="white")
 
     plt.tight_layout(pad=2.0)
 
@@ -771,9 +791,16 @@ async def potm(interaction: discord.Interaction):
         )
         return
 
+    # Build weekly score for each player from match history
+    weekly_scores: dict[str, float] = {}
+    for player in stats:
+        pname = player["player_name"]
+        recent = get_player_recent_goals_assists(interaction.guild_id, pname, days=7)
+        weekly_scores[pname] = recent["goals"] * 10 + recent["assists"] * 7
+
     embed = discord.Embed(
         title="🏅 Player of the Month Standings",
-        description=f"**{current_month}** - Current Standings",
+        description=f"**{current_month}** — Current Standings",
         color=discord.Color.gold(),
     )
 
@@ -781,13 +808,42 @@ async def potm(interaction: discord.Interaction):
     for i, player in enumerate(stats[:10]):
         rank = medals[i] if i < 3 else f"{i + 1}."
         avg_rating = player["avg_rating"]
+        # Weekly trend arrow
+        w = weekly_scores.get(player["player_name"], 0)
+        if w > 15:
+            trend = " 🔥"
+        elif w > 0:
+            trend = " 📈"
+        else:
+            trend = ""
         embed.add_field(
-            name=f"{rank} {player['player_name']}",
-            value=f"Score: **{player['monthly_score']:.1f}** | ⚽ {player['goals']} | 🅰️ {player['assists']} | ⭐ {avg_rating:.1f} | 🎮 {player['matches_played']}",
-            inline=False
+            name=f"{rank} {player['player_name']}{trend}",
+            value=(
+                f"Score: **{player['monthly_score']:.1f}** | "
+                f"⚽ {player['goals']} | 🅰️ {player['assists']} | "
+                f"⭐ {avg_rating:.1f} | 🎮 {player['matches_played']}"
+            ),
+            inline=False,
         )
 
-    embed.set_footer(text="Score = Goals×10 + Assists×7 + Avg Rating×5 + Matches×2")
+    # Historical POTM winners
+    history = get_potm_history(interaction.guild_id, limit=6)
+    # Filter out current month
+    past = [h for h in history if h["month_period"] != current_month]
+    if past:
+        history_lines = []
+        for h in past[:5]:
+            history_lines.append(
+                f"**{h['month_period']}** — 🏅 **{h['player_name']}** "
+                f"({h['goals']}G {h['assists']}A ⭐{h['avg_rating']:.1f})"
+            )
+        embed.add_field(
+            name="📜 Past Winners",
+            value="\n".join(history_lines),
+            inline=False,
+        )
+
+    embed.set_footer(text="Score = Goals×10 + Assists×7 + Avg Rating×5 + Matches×2 | 🔥 = active this week")
     await interaction.followup.send(embed=embed)
 
 
@@ -1165,6 +1221,31 @@ async def playerstats(interaction: discord.Interaction, player_name: str):
             if red_cards > 0:
                 stats_embed.add_field(name="🟥 Red Cards", value=str(red_cards), inline=True)
 
+            # Next milestone progress
+            from milestones import MILESTONE_THRESHOLDS
+            from database import has_milestone_been_announced as _hm
+            milestone_lines = []
+            _stat_map = [
+                ("goals", goals, "⚽"),
+                ("assists", assists, "🅰️"),
+                ("matches", matches_played, "🎮"),
+                ("motm", motm, "⭐"),
+            ]
+            for stat_key, current_val, stat_emoji in _stat_map:
+                for threshold in MILESTONE_THRESHOLDS[stat_key]:
+                    if current_val < threshold:
+                        remaining = threshold - current_val
+                        milestone_lines.append(
+                            f"{stat_emoji} {current_val}/{threshold} — **{remaining}** to go"
+                        )
+                        break
+            if milestone_lines:
+                stats_embed.add_field(
+                    name="🎯 Next Milestones",
+                    value="\n".join(milestone_lines),
+                    inline=False,
+                )
+
             stats_embed.set_footer(text=f"Platform: {used_platform} | Page 1/3")
 
             # Build achievements embed (page 2)
@@ -1172,15 +1253,18 @@ async def playerstats(interaction: discord.Interaction, player_name: str):
             from achievements import ACHIEVEMENTS
 
             achievement_history = get_player_achievement_history(interaction.guild_id, name)
+            earned_ids = {a["achievement_id"] for a in achievement_history}
             ach_embed = discord.Embed(
                 title=f"🏆 {name}'s Achievements",
                 color=discord.Color.gold(),
             )
+            earned_count = len(achievement_history)
+            total_count = len(ACHIEVEMENTS)
+            ach_embed.description = (
+                f"**{earned_count}/{total_count}** achievements earned"
+            )
+
             if achievement_history:
-                ach_embed.description = (
-                    f"**{len(achievement_history)}** achievement"
-                    f"{'s' if len(achievement_history) != 1 else ''} earned"
-                )
                 categorized: dict = {}
                 for ach in achievement_history:
                     ach_id = ach["achievement_id"]
@@ -1197,11 +1281,44 @@ async def playerstats(interaction: discord.Interaction, player_name: str):
                         ),
                         inline=False,
                     )
-            else:
-                ach_embed.description = (
-                    f"No achievements earned yet. Use `/listachievements` to see "
-                    f"what's available!"
+
+            # Locked achievements with progress hints
+            # Map achievement IDs to progress based on current stats
+            _progress_hints: dict[str, str] = {
+                "hat_trick_hero": f"{hat_tricks}/1 hat trick",
+                "assist_king": f"{assist_hat_tricks}/1 assist hat trick",
+                "brace": f"{goals} career goals",
+                "poker": f"{goals} career goals",
+                "century": f"{goals}/100 goals",
+                "provider": f"{assists}/100 assists",
+                "iron_man": f"{matches_played}/50 matches",
+                "sharpshooter": f"{shot_success_rate}% shot acc (need 70%+, 50+ matches)",
+                "midfield_maestro": f"{pass_success_rate}% pass acc (need 90%+, 100+ matches)",
+                "the_wall": f"{tackle_success_rate}% tackle success (need 80%+, 500+ tackles)",
+                "goal_machine": f"{goals_per_game:.2f} goals/game (need 2.0+, 25+ matches)",
+                "playmaker": f"{goals}G / {assists}A (need more assists than goals, 50+ each)",
+                "man_of_match": f"{motm} MOTM awards",
+            }
+
+            locked = [
+                (ach_id, data) for ach_id, data in ACHIEVEMENTS.items()
+                if ach_id not in earned_ids
+            ]
+            if locked:
+                locked_lines = []
+                for ach_id, data in locked[:8]:  # cap at 8 to avoid embed overflow
+                    hint = _progress_hints.get(ach_id, "")
+                    hint_str = f" `{hint}`" if hint else ""
+                    locked_lines.append(f"🔒 **{data['name']}** — {data['description']}{hint_str}")
+                remaining = len(locked) - 8
+                if remaining > 0:
+                    locked_lines.append(f"*…and {remaining} more. Use `/listachievements` to see all.*")
+                ach_embed.add_field(
+                    name="🔒 Locked Achievements",
+                    value="\n".join(locked_lines),
+                    inline=False,
                 )
+
             ach_embed.set_footer(text=f"Platform: {used_platform} | Page 2/3")
 
             # Build stats-over-time embed (page 3) and pre-render the chart
@@ -1314,8 +1431,27 @@ async def lastmatches(interaction: discord.Interaction, match_type: app_commands
                 )
                 return
             
+            # Calculate summary stats across all fetched matches
+            total_w = total_d = total_l = total_gf = total_ga = 0
+            for match in matches:
+                clubs_s = match.get("clubs", {})
+                oc = clubs_s.get(str(club_id), {})
+                opp_ids = [cid for cid in clubs_s.keys() if str(cid) != str(club_id)]
+                opc = clubs_s.get(opp_ids[0], {}) if opp_ids else {}
+                r = oc.get("result", "")
+                if r == "1": total_w += 1
+                elif r == "2": total_l += 1
+                elif r == "3": total_d += 1
+                try: total_gf += int(oc.get("score", 0) or 0)
+                except ValueError: pass
+                try: total_ga += int(opc.get("score", 0) or 0)
+                except ValueError: pass
+
+            summary_line = f"W{total_w} D{total_d} L{total_l}  |  ⚽ {total_gf} scored, {total_ga} conceded"
+
             # Build one page per match with full player breakdown
             pages = []
+            total_matches = len(matches)
             for i, match in enumerate(matches, 1):
                 clubs = match.get("clubs", {})
                 our_club = clubs.get(str(club_id), {})
@@ -1329,13 +1465,13 @@ async def lastmatches(interaction: discord.Interaction, match_type: app_commands
 
                 result = our_club.get("result", "")
                 if result == "1":
-                    result_emoji = "✅ Win"
+                    result_emoji = "✅"
                     color = 0x2ecc71
                 elif result == "2":
-                    result_emoji = "❌ Loss"
+                    result_emoji = "❌"
                     color = 0xe74c3c
                 elif result == "3":
-                    result_emoji = "🤝 Draw"
+                    result_emoji = "🤝"
                     color = 0xf1c40f
                 else:
                     result_emoji = "❓"
@@ -1348,8 +1484,8 @@ async def lastmatches(interaction: discord.Interaction, match_type: app_commands
                 )
 
                 embed = discord.Embed(
-                    title=f"Match {i}/{len(matches)} — {result_emoji} {our_score}–{opp_score}",
-                    description=f"**{club_name}** vs **{opponent_name}** | {time_str} ago",
+                    title=f"{result_emoji} {our_score}–{opp_score} vs {opponent_name}",
+                    description=f"📊 `{summary_line}`\n🕐 {time_str} ago",
                     color=color,
                 )
 
@@ -1377,7 +1513,7 @@ async def lastmatches(interaction: discord.Interaction, match_type: app_commands
                         g = f"⚽{p['goals']}" if p["goals"] > 0 else ""
                         a = f"🅰️{p['assists']}" if p["assists"] > 0 else ""
                         extras = " ".join(filter(None, [g, a]))
-                        line = f"**{p['name']}** — ⭐{p['rating']:.1f}{motm_tag}"
+                        line = f"**{p['name']}** — {p['rating']:.1f}{motm_tag}"
                         if extras:
                             line += f"  {extras}"
                         lines.append(line)
@@ -1388,7 +1524,7 @@ async def lastmatches(interaction: discord.Interaction, match_type: app_commands
                     )
 
                 embed.set_footer(
-                    text=f"Platform: {used_platform} | {type_label} | Page {i}/{len(matches)}"
+                    text=f"Match {i}/{total_matches} | {type_label} | {used_platform}"
                 )
                 pages.append(embed)
             
@@ -1403,7 +1539,10 @@ async def lastmatches(interaction: discord.Interaction, match_type: app_commands
 
 
 @client.tree.command(name="leaderboard", description="Show club leaderboard for various stats")
-@app_commands.describe(category="The stat category to rank by")
+@app_commands.describe(
+    category="The stat category to rank by",
+    period="Career stats (default) or this month only",
+)
 @app_commands.choices(
     category=[
         app_commands.Choice(name="Goals ⚽", value="goals"),
@@ -1416,9 +1555,18 @@ async def lastmatches(interaction: discord.Interaction, match_type: app_commands
         app_commands.Choice(name="Assists Per Game 📈", value="assists_per_game"),
         app_commands.Choice(name="Hat-tricks 🎩", value="hat_tricks"),
         app_commands.Choice(name="Assist Hat-tricks 🎯", value="assist_hat_tricks"),
+        app_commands.Choice(name="Combined Score 🏆", value="combined"),
+    ],
+    period=[
+        app_commands.Choice(name="Career 📊", value="career"),
+        app_commands.Choice(name="This Month 📅", value="month"),
     ],
 )
-async def leaderboard(interaction: discord.Interaction, category: app_commands.Choice[str]):
+async def leaderboard(
+    interaction: discord.Interaction,
+    category: app_commands.Choice[str],
+    period: app_commands.Choice[str] = None,
+):
     await interaction.response.defer(thinking=True)
     st = get_settings(interaction.guild_id)
     if not st or not (st.get("club_id") and st.get("platform")):
@@ -1427,6 +1575,7 @@ async def leaderboard(interaction: discord.Interaction, category: app_commands.C
 
     club_id = int(st["club_id"])
     platform = st["platform"]
+    use_month = period is not None and period.value == "month"
 
     try:
         async with aiohttp.ClientSession(timeout=HTTP_TIMEOUT) as session:
@@ -1445,7 +1594,7 @@ async def leaderboard(interaction: discord.Interaction, category: app_commands.C
                 club_info = {}
             club_name = club_info.get("name", "Unknown Club")
 
-            # Fetch members data
+            # Fetch members data (always needed for names + career fallback)
             members_data = await fetch_json(
                 session,
                 "/members/stats",
@@ -1460,12 +1609,12 @@ async def leaderboard(interaction: discord.Interaction, category: app_commands.C
                 )
 
             members = [m for m in members_list if isinstance(m, dict)]
-            
+
             # Cache player names for autocomplete
             player_names = [m.get("name", "") for m in members if m.get("name")]
             if player_names:
                 cache_club_members(interaction.guild_id, player_names)
-            
+
             if not members:
                 await interaction.followup.send("No player data available.", ephemeral=True)
                 return
@@ -1473,46 +1622,59 @@ async def leaderboard(interaction: discord.Interaction, category: app_commands.C
             # Get hat-trick stats for all players
             hat_trick_stats = get_all_players_hat_trick_stats(interaction.guild_id)
             hat_trick_dict = {stat["player_name"]: stat for stat in hat_trick_stats}
-            
-            # Calculate derived stats for each player using correct EA API field names
+
+            # Monthly stats lookup when period=month
+            month_lookup: dict = {}
+            if use_month:
+                month_period = detect_month_period()
+                for ms in get_monthly_stats(interaction.guild_id, month_period):
+                    month_lookup[ms["player_name"]] = ms
+
+            # Calculate derived stats for each player
             for m in members:
-                matches = int(m.get("gamesPlayed", 0))
-                m["_matches"] = matches
-                
-                # Core stats
-                goals = int(m.get("goals", 0))
-                assists = int(m.get("assists", 0))
-                m["_goals"] = goals
-                m["_assists"] = assists
-                m["_goals_per_game"] = goals / matches if matches else 0
-                m["_assists_per_game"] = assists / matches if matches else 0
-                
-                # Pass accuracy (already a percentage)
+                pname = m.get("name", "")
+                if use_month and pname in month_lookup:
+                    ms = month_lookup[pname]
+                    m_matches = ms["matches_played"]
+                    m_goals = ms["goals"]
+                    m_assists = ms["assists"]
+                    m_rating = ms["avg_rating"]
+                    m_score = ms["monthly_score"]
+                else:
+                    m_matches = int(m.get("gamesPlayed", 0))
+                    m_goals = int(m.get("goals", 0))
+                    m_assists = int(m.get("assists", 0))
+                    m_rating = float(m.get("ratingAve", 0))
+                    m_score = m_goals * 10 + m_assists * 7 + m_rating * 5 + m_matches * 2
+
+                m["_matches"] = m_matches
+                m["_goals"] = m_goals
+                m["_assists"] = m_assists
+                m["_goals_per_game"] = m_goals / m_matches if m_matches else 0
+                m["_assists_per_game"] = m_assists / m_matches if m_matches else 0
                 m["_pass_accuracy"] = int(m.get("passSuccessRate", 0))
-                
-                # Other stats
                 m["_motm"] = int(m.get("manOfTheMatch", 0))
-                m["_rating"] = float(m.get("ratingAve", 0))
-                
-                # Hat-trick stats from match history
-                player_name = m.get("name", "")
-                player_ht_stats = hat_trick_dict.get(player_name, {"hat_tricks": 0, "assist_hat_tricks": 0})
+                m["_rating"] = m_rating
+                m["_combined"] = m_score
+                player_ht_stats = hat_trick_dict.get(pname, {"hat_tricks": 0, "assist_hat_tricks": 0})
                 m["_hat_tricks"] = player_ht_stats["hat_tricks"]
                 m["_assist_hat_tricks"] = player_ht_stats["assist_hat_tricks"]
+
+            period_label = f"This Month ({detect_month_period()})" if use_month else "Career"
 
             # Sort based on category
             cat_value = category.value
             if cat_value == "goals":
                 sorted_members = sorted(members, key=lambda m: m["_goals"], reverse=True)
-                title = "⚽ Goals Leaderboard"
+                title = f"⚽ Goals Leaderboard — {period_label}"
                 format_fn = lambda m: f"{m['_goals']} goals"
             elif cat_value == "assists":
                 sorted_members = sorted(members, key=lambda m: m["_assists"], reverse=True)
-                title = "🅰️ Assists Leaderboard"
+                title = f"🅰️ Assists Leaderboard — {period_label}"
                 format_fn = lambda m: f"{m['_assists']} assists"
             elif cat_value == "matches":
                 sorted_members = sorted(members, key=lambda m: m["_matches"], reverse=True)
-                title = "🎮 Matches Played Leaderboard"
+                title = f"🎮 Matches Played Leaderboard — {period_label}"
                 format_fn = lambda m: f"{m['_matches']} matches"
             elif cat_value == "motm":
                 sorted_members = sorted(members, key=lambda m: m["_motm"], reverse=True)
@@ -1520,7 +1682,7 @@ async def leaderboard(interaction: discord.Interaction, category: app_commands.C
                 format_fn = lambda m: f"{m['_motm']} MOTM"
             elif cat_value == "rating":
                 sorted_members = sorted(members, key=lambda m: m["_rating"], reverse=True)
-                title = "📊 Average Rating Leaderboard"
+                title = f"📊 Average Rating Leaderboard — {period_label}"
                 format_fn = lambda m: f"{m['_rating']:.1f} rating"
             elif cat_value == "pass_accuracy":
                 sorted_members = sorted(members, key=lambda m: m["_pass_accuracy"], reverse=True)
@@ -1528,11 +1690,11 @@ async def leaderboard(interaction: discord.Interaction, category: app_commands.C
                 format_fn = lambda m: f"{m['_pass_accuracy']}% accuracy"
             elif cat_value == "goals_per_game":
                 sorted_members = sorted(members, key=lambda m: m["_goals_per_game"], reverse=True)
-                title = "📈 Goals Per Game Leaderboard"
+                title = f"📈 Goals Per Game Leaderboard — {period_label}"
                 format_fn = lambda m: f"{m['_goals_per_game']:.2f} goals/game"
             elif cat_value == "assists_per_game":
                 sorted_members = sorted(members, key=lambda m: m["_assists_per_game"], reverse=True)
-                title = "📈 Assists Per Game Leaderboard"
+                title = f"📈 Assists Per Game Leaderboard — {period_label}"
                 format_fn = lambda m: f"{m['_assists_per_game']:.2f} assists/game"
             elif cat_value == "hat_tricks":
                 sorted_members = sorted(members, key=lambda m: m["_hat_tricks"], reverse=True)
@@ -1542,6 +1704,13 @@ async def leaderboard(interaction: discord.Interaction, category: app_commands.C
                 sorted_members = sorted(members, key=lambda m: m["_assist_hat_tricks"], reverse=True)
                 title = "🎯 Assist Hat-tricks Leaderboard"
                 format_fn = lambda m: f"{m['_assist_hat_tricks']} assist hat-trick{'s' if m['_assist_hat_tricks'] != 1 else ''}"
+            elif cat_value == "combined":
+                sorted_members = sorted(members, key=lambda m: m["_combined"], reverse=True)
+                title = f"🏆 Combined Score Leaderboard — {period_label}"
+                format_fn = lambda m: (
+                    f"Score: **{m['_combined']:.0f}** | "
+                    f"⚽{m['_goals']} 🅰️{m['_assists']} ⭐{m['_rating']:.1f} 🎮{m['_matches']}"
+                )
             else:
                 sorted_members = members
                 title = "Leaderboard"
@@ -2004,7 +2173,9 @@ async def bestxi(interaction: discord.Interaction, period: app_commands.Choice[s
             name = m.get("name", "")
             if not name:
                 continue
-            pos = _normalize(m.get("favoritePosition") or m.get("proPos") or "ANY")
+            # Use most-played position from match history; fall back to EA API favorite
+            dominant_raw = get_player_dominant_position(interaction.guild_id, name)
+            pos = _normalize(dominant_raw or m.get("favoritePosition") or m.get("proPos") or "ANY")
             group = _group(pos)
 
             if use_month and name in monthly_lookup:

@@ -210,6 +210,8 @@ def init_db():
                 db.execute("ALTER TABLE player_match_history ADD COLUMN position TEXT")
             if "result" not in match_history_columns:
                 db.execute("ALTER TABLE player_match_history ADD COLUMN result TEXT")
+            if "rating" not in match_history_columns:
+                db.execute("ALTER TABLE player_match_history ADD COLUMN rating REAL DEFAULT 0.0")
         return True
     except Exception as e:
         raise RuntimeError(f"Failed to initialize database: {e}") from e
@@ -455,7 +457,7 @@ def get_player_match_history(guild_id: int, player_name: str, limit: int = 20) -
         with sqlite3.connect(DB_PATH) as db:
             cur = db.execute(
                 """
-                SELECT match_id, goals, assists, clean_sheet, played_at, result
+                SELECT match_id, goals, assists, clean_sheet, played_at, result, rating
                 FROM player_match_history
                 WHERE guild_id=? AND player_name=?
                 ORDER BY played_at DESC
@@ -472,7 +474,8 @@ def get_player_match_history(guild_id: int, player_name: str, limit: int = 20) -
                     "assists": row[2],
                     "clean_sheet": bool(row[3]),
                     "played_at": row[4],
-                    "result": row[5]
+                    "result": row[5],
+                    "rating": float(row[6]) if row[6] else 0.0,
                 }
                 for row in reversed(rows)
             ]
@@ -481,26 +484,111 @@ def get_player_match_history(guild_id: int, player_name: str, limit: int = 20) -
         return []
 
 
-def update_player_match_history(guild_id: int, player_name: str, match_id: str, goals: int, assists: int, clean_sheet: bool, position: str = None, result: str = None):
+def get_player_dominant_position(guild_id: int, player_name: str) -> str | None:
+    """Get the most frequently played position from match history (excludes ANY/Unknown)."""
+    try:
+        with sqlite3.connect(DB_PATH) as db:
+            cur = db.execute(
+                """
+                SELECT position, COUNT(*) as cnt
+                FROM player_match_history
+                WHERE guild_id=? AND player_name=?
+                  AND position IS NOT NULL
+                  AND position NOT IN ('Unknown', 'ANY', '28', '')
+                GROUP BY position
+                ORDER BY cnt DESC
+                LIMIT 1
+                """,
+                (guild_id, player_name),
+            )
+            row = cur.fetchone()
+            return row[0] if row else None
+    except Exception as e:
+        logger.error(f"[Database] ❌ Failed to get dominant position: {e}", exc_info=True)
+        return None
+
+
+def get_potm_history(guild_id: int, limit: int = 6) -> list[dict]:
+    """Get the top scorer for each past month (for POTM history display)."""
+    try:
+        with sqlite3.connect(DB_PATH) as db:
+            cur = db.execute(
+                """
+                SELECT ms.month_period, ms.player_name, ms.monthly_score, ms.goals, ms.assists,
+                       ms.matches_played, ms.total_rating
+                FROM monthly_stats ms
+                INNER JOIN (
+                    SELECT month_period, MAX(monthly_score) AS max_score
+                    FROM monthly_stats
+                    WHERE guild_id=?
+                    GROUP BY month_period
+                ) top ON ms.month_period = top.month_period AND ms.monthly_score = top.max_score
+                WHERE ms.guild_id=?
+                ORDER BY ms.month_period DESC
+                LIMIT ?
+                """,
+                (guild_id, guild_id, limit),
+            )
+            rows = cur.fetchall()
+            return [
+                {
+                    "month_period": row[0],
+                    "player_name": row[1],
+                    "monthly_score": row[2],
+                    "goals": row[3],
+                    "assists": row[4],
+                    "matches_played": row[5],
+                    "avg_rating": row[6] / row[5] if row[5] > 0 else 0.0,
+                }
+                for row in rows
+            ]
+    except Exception as e:
+        logger.error(f"[Database] ❌ Failed to get POTM history: {e}", exc_info=True)
+        return []
+
+
+def get_player_recent_goals_assists(guild_id: int, player_name: str, days: int = 7) -> dict:
+    """Get goals + assists for a player in the last N days (for weekly trend)."""
+    try:
+        from datetime import timedelta
+        cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
+        with sqlite3.connect(DB_PATH) as db:
+            cur = db.execute(
+                """
+                SELECT COALESCE(SUM(goals), 0), COALESCE(SUM(assists), 0), COUNT(*)
+                FROM player_match_history
+                WHERE guild_id=? AND player_name=? AND played_at >= ?
+                """,
+                (guild_id, player_name, cutoff),
+            )
+            row = cur.fetchone()
+            return {"goals": row[0], "assists": row[1], "matches": row[2]}
+    except Exception as e:
+        logger.error(f"[Database] ❌ Failed to get recent stats: {e}", exc_info=True)
+        return {"goals": 0, "assists": 0, "matches": 0}
+
+
+def update_player_match_history(guild_id: int, player_name: str, match_id: str, goals: int, assists: int, clean_sheet: bool, position: str = None, result: str = None, rating: float = 0.0):
     """Add or update a player's match in their history.
 
     Args:
         result: Match result for the team - 'W', 'L', or 'D' (optional)
+        rating: Player's rating for this match (optional)
     """
     # Calculate hat-trick flags
     hat_trick = 1 if goals >= 3 else 0
     assist_hat_trick = 1 if assists >= 3 else 0
 
-    logger.debug(f"[Database] Updating match history: player={player_name}, match={match_id}, goals={goals}, assists={assists}, position={position}, result={result}, hat_trick={hat_trick}, assist_hat_trick={assist_hat_trick}")
+    logger.debug(f"[Database] Updating match history: player={player_name}, match={match_id}, goals={goals}, assists={assists}, position={position}, result={result}, rating={rating}, hat_trick={hat_trick}, assist_hat_trick={assist_hat_trick}")
     try:
         with sqlite3.connect(DB_PATH) as db:
             db.execute(
                 """
                 INSERT OR REPLACE INTO player_match_history
-                (guild_id, player_name, match_id, goals, assists, clean_sheet, hat_trick, assist_hat_trick, position, result, played_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (guild_id, player_name, match_id, goals, assists, clean_sheet, hat_trick, assist_hat_trick, position, result, rating, played_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (guild_id, player_name, match_id, goals, assists, 1 if clean_sheet else 0, hat_trick, assist_hat_trick, position, result, datetime.utcnow().isoformat()),
+                (guild_id, player_name, match_id, goals, assists, 1 if clean_sheet else 0, hat_trick, assist_hat_trick, position, result, rating, datetime.utcnow().isoformat()),
             )
             db.commit()
         logger.debug(f"[Database] ✅ Match history updated successfully")
