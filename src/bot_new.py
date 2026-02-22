@@ -1923,6 +1923,322 @@ async def statsovertime(interaction: discord.Interaction, player_name: str):
         )
 
 
+@client.tree.command(name="bestxi", description="Best XI lineup based on player ratings")
+@app_commands.describe(period="Which period to base selection on (default: this month)")
+@app_commands.choices(period=[
+    app_commands.Choice(name="This month 📅", value="month"),
+    app_commands.Choice(name="Career 📊",     value="career"),
+])
+async def bestxi(interaction: discord.Interaction, period: app_commands.Choice[str] = None):
+    """Auto-build the best 4-3-3 lineup using avg rating per player, grouped by position."""
+    await interaction.response.defer(thinking=True)
+
+    st = get_settings(interaction.guild_id)
+    if not st or not (st.get("club_id") and st.get("platform")):
+        await interaction.followup.send("Set a club first with `/setclub`.", ephemeral=True)
+        return
+
+    club_id = int(st["club_id"])
+    platform = st["platform"]
+    use_month = period is None or period.value == "month"
+
+    # EA Pro Clubs numeric position code -> short name
+    _POS_CODE = {
+        "0": "GK",  "1": "SW",  "2": "RWB", "3": "RB",  "4": "RCB",
+        "5": "CB",  "6": "LCB", "7": "LB",  "8": "LWB", "9": "RDM",
+        "10": "CDM","11": "LDM","12": "RM", "13": "RCM","14": "CM",
+        "15": "LCM","16": "LM", "17": "RAM","18": "CAM","19": "LAM",
+        "20": "RF", "21": "CF", "22": "LF", "23": "RW", "24": "RS",
+        "25": "ST", "26": "LS", "27": "LW", "28": "ANY",
+    }
+    _GK  = {"GK", "SW"}
+    _DEF = {"RWB","RB","RCB","CB","LCB","LB","LWB"}
+    _MID = {"RDM","CDM","LDM","RM","RCM","CM","LCM","LM","RAM","CAM","LAM"}
+    _ATT = {"RF","CF","LF","RW","RS","ST","LS","LW"}
+
+    def _normalize(raw) -> str:
+        s = str(raw).strip()
+        return _POS_CODE.get(s, s.upper()) if s.isdigit() else s.upper()
+
+    def _group(pos: str) -> str:
+        if pos in _GK:  return "GK"
+        if pos in _DEF: return "DEF"
+        if pos in _MID: return "MID"
+        if pos in _ATT: return "ATT"
+        return "ANY"
+
+    try:
+        async with aiohttp.ClientSession(timeout=HTTP_TIMEOUT) as session:
+            await warmup_session(session)
+
+            info, used_platform = await fetch_club_info(session, platform, club_id)
+            if isinstance(info, list):
+                club_info = next((e for e in info if str(e.get("clubId")) == str(club_id)), {})
+            elif isinstance(info, dict):
+                club_info = info.get(str(club_id), {})
+            else:
+                club_info = {}
+            club_name = club_info.get("name", "Unknown Club")
+
+            members_data = await fetch_json(
+                session, "/members/stats",
+                {"clubId": str(club_id), "platform": used_platform},
+            )
+            if isinstance(members_data, list):
+                members_list = members_data
+            else:
+                members_list = members_data.get("members", []) if isinstance(members_data, dict) else []
+            members = [m for m in members_list if isinstance(m, dict)]
+
+        # Monthly stats lookup (for "month" mode)
+        month_period = detect_month_period()
+        monthly_lookup = {}
+        if use_month:
+            for s in get_monthly_stats(interaction.guild_id, month_period):
+                monthly_lookup[s["player_name"]] = s
+
+        # Build player list with stats + position group
+        min_matches = 3 if use_month else 5
+        players = []
+        for m in members:
+            name = m.get("name", "")
+            if not name:
+                continue
+            pos = _normalize(m.get("favoritePosition") or m.get("proPos") or "ANY")
+            group = _group(pos)
+
+            if use_month and name in monthly_lookup:
+                ms = monthly_lookup[name]
+                rating  = ms["avg_rating"]
+                goals   = ms["goals"]
+                assists = ms["assists"]
+                matches = ms["matches_played"]
+            else:
+                rating  = float(m.get("ratingAve", 0))
+                goals   = int(m.get("goals", 0))
+                assists = int(m.get("assists", 0))
+                matches = int(m.get("gamesPlayed", 0))
+
+            if matches < min_matches:
+                continue
+
+            players.append(dict(
+                name=name, pos=pos, group=group,
+                rating=rating, goals=goals, assists=assists, matches=matches,
+            ))
+
+        # Sort each group by rating desc
+        by_group: dict[str, list] = {"GK": [], "DEF": [], "MID": [], "ATT": [], "ANY": []}
+        for p in players:
+            by_group[p["group"]].append(p)
+        for g in by_group:
+            by_group[g].sort(key=lambda x: x["rating"], reverse=True)
+
+        # Fill 4-3-3 slots; fall back to ANY-position players if a group is short
+        SLOTS = [("GK", 1), ("DEF", 4), ("MID", 3), ("ATT", 3)]
+        selected_by_group: dict[str, list] = {}
+        used: set[str] = set()
+        for group, count in SLOTS:
+            pool = [p for p in by_group[group] if p["name"] not in used]
+            if len(pool) < count:
+                fill = [p for p in by_group["ANY"] if p["name"] not in used]
+                pool = pool + fill
+            chosen = pool[:count]
+            selected_by_group[group] = chosen
+            used.update(p["name"] for p in chosen)
+
+        total = sum(len(v) for v in selected_by_group.values())
+        if total == 0:
+            await interaction.followup.send(
+                f"Not enough players with {min_matches}+ matches to build a Best XI.\n"
+                "Play more matches or try **Career** mode.",
+                ephemeral=True,
+            )
+            return
+
+        # Build embed
+        period_label = f"This month ({month_period})" if use_month else "Career"
+        embed = discord.Embed(
+            title=f"🏟️ Best XI — {club_name}",
+            description=f"📅 **{period_label}** | Formation: 4-3-3 | Ranked by avg rating",
+            color=discord.Color.gold(),
+        )
+
+        _emoji = {"GK": "🧤", "DEF": "🛡️", "MID": "⚙️", "ATT": "⚽"}
+        _label = {"GK": "Goalkeeper", "DEF": "Defenders", "MID": "Midfielders", "ATT": "Attackers"}
+
+        for group, _ in SLOTS:
+            group_players = selected_by_group.get(group, [])
+            if not group_players:
+                continue
+            lines = []
+            for p in group_players:
+                lines.append(
+                    f"⭐ **{p['rating']:.2f}** | **{p['name']}** "
+                    f"— {p['goals']}G {p['assists']}A ({p['matches']} matches)"
+                )
+            embed.add_field(
+                name=f"{_emoji[group]} {_label[group]}",
+                value="\n".join(lines),
+                inline=False,
+            )
+
+        embed.set_footer(text=f"Min {min_matches} matches required | Platform: {used_platform}")
+        await interaction.followup.send(embed=embed)
+
+    except Exception as e:
+        logger.error(f"Error in /bestxi: {e}", exc_info=True)
+        await interaction.followup.send(f"Could not build Best XI. Error: {e}", ephemeral=True)
+
+
+@client.tree.command(name="headtohead", description="Compare two players side by side")
+@app_commands.describe(
+    player1="First player to compare",
+    player2="Second player to compare",
+)
+@app_commands.autocomplete(player1=player_name_autocomplete, player2=player_name_autocomplete)
+async def headtohead(interaction: discord.Interaction, player1: str, player2: str):
+    """Compare two club members side by side across all key stats."""
+    await interaction.response.defer(thinking=True)
+
+    if player1.lower() == player2.lower():
+        await interaction.followup.send("Choose two different players to compare.", ephemeral=True)
+        return
+
+    st = get_settings(interaction.guild_id)
+    if not st or not (st.get("club_id") and st.get("platform")):
+        await interaction.followup.send("Set a club first with `/setclub`.", ephemeral=True)
+        return
+
+    club_id = int(st["club_id"])
+    platform = st["platform"]
+
+    try:
+        async with aiohttp.ClientSession(timeout=HTTP_TIMEOUT) as session:
+            await warmup_session(session)
+
+            info, used_platform = await fetch_club_info(session, platform, club_id)
+            if isinstance(info, list):
+                club_info = next(
+                    (e for e in info if str(e.get("clubId")) == str(club_id)), {}
+                )
+            elif isinstance(info, dict):
+                club_info = info.get(str(club_id), {})
+            else:
+                club_info = {}
+            club_name = club_info.get("name", "Unknown Club")
+
+            members_data = await fetch_json(
+                session,
+                "/members/stats",
+                {"clubId": str(club_id), "platform": used_platform},
+            )
+            if isinstance(members_data, list):
+                members_list = members_data
+            else:
+                members_list = members_data.get("members", []) if isinstance(members_data, dict) else []
+
+            members = [m for m in members_list if isinstance(m, dict)]
+
+            def find_player(name: str):
+                # exact match first, then partial
+                for m in members:
+                    if m.get("name", "").lower() == name.lower():
+                        return m
+                for m in members:
+                    if name.lower() in m.get("name", "").lower():
+                        return m
+                return None
+
+            p1 = find_player(player1)
+            p2 = find_player(player2)
+
+            missing = []
+            if not p1:
+                missing.append(player1)
+            if not p2:
+                missing.append(player2)
+            if missing:
+                await interaction.followup.send(
+                    f"❌ Could not find: {', '.join(f'`{n}`' for n in missing)} in **{club_name}**.",
+                    ephemeral=True,
+                )
+                return
+
+            def extract(m: dict) -> dict:
+                matches = int(m.get("gamesPlayed", 0))
+                goals = int(m.get("goals", 0))
+                assists = int(m.get("assists", 0))
+                rating = float(m.get("ratingAve", 0))
+                motm = int(m.get("manOfTheMatch", 0))
+                win_rate = int(m.get("winRate", 0))
+                pass_acc = int(m.get("passSuccessRate", 0))
+                shot_acc = int(m.get("shotSuccessRate", 0))
+                tackles = int(m.get("tacklesMade", 0))
+                tackle_acc = int(m.get("tackleSuccessRate", 0))
+                red_cards = int(m.get("redCards", 0))
+                gpg = goals / matches if matches else 0.0
+                apg = assists / matches if matches else 0.0
+                return dict(
+                    name=m.get("name", "Unknown"),
+                    matches=matches, goals=goals, assists=assists,
+                    rating=rating, motm=motm, win_rate=win_rate,
+                    pass_acc=pass_acc, shot_acc=shot_acc,
+                    tackles=tackles, tackle_acc=tackle_acc,
+                    red_cards=red_cards, gpg=gpg, apg=apg,
+                )
+
+            s1, s2 = extract(p1), extract(p2)
+
+            # Build side-by-side field values with 🏆 on the winning side
+            def cmp(v1, v2, *, higher_is_better=True, fmt=str):
+                if higher_is_better:
+                    w1, w2 = v1 > v2, v2 > v1
+                else:
+                    w1, w2 = v1 < v2, v2 < v1
+                t1 = ("🏆 " if w1 else "    ") + fmt(v1)
+                t2 = ("🏆 " if w2 else "    ") + fmt(v2)
+                return t1, t2
+
+            rows = [
+                ("🎮 Matches",       *cmp(s1["matches"],   s2["matches"])),
+                ("📈 Win %",         *cmp(s1["win_rate"],  s2["win_rate"],  fmt=lambda x: f"{x}%")),
+                ("⭐ Avg Rating",    *cmp(s1["rating"],    s2["rating"],    fmt=lambda x: f"{x:.2f}")),
+                ("⚽ Goals",         *cmp(s1["goals"],     s2["goals"])),
+                ("🅰️ Assists",       *cmp(s1["assists"],   s2["assists"])),
+                ("📊 Goals/Game",    *cmp(s1["gpg"],       s2["gpg"],       fmt=lambda x: f"{x:.2f}")),
+                ("📊 Assists/Game",  *cmp(s1["apg"],       s2["apg"],       fmt=lambda x: f"{x:.2f}")),
+                ("🏅 MOTM",          *cmp(s1["motm"],      s2["motm"])),
+                ("🎯 Pass Acc.",     *cmp(s1["pass_acc"],  s2["pass_acc"],  fmt=lambda x: f"{x}%")),
+                ("🥅 Shot Acc.",     *cmp(s1["shot_acc"],  s2["shot_acc"],  fmt=lambda x: f"{x}%")),
+                ("🛡️ Tackles",       *cmp(s1["tackles"],   s2["tackles"])),
+                ("🛡️ Tackle Acc.",   *cmp(s1["tackle_acc"],s2["tackle_acc"],fmt=lambda x: f"{x}%")),
+            ]
+            # Only add red cards row if either player has any
+            if s1["red_cards"] or s2["red_cards"]:
+                rows.append(("🟥 Red Cards", *cmp(s1["red_cards"], s2["red_cards"], higher_is_better=False)))
+
+            labels_col = "\n".join(label for label, _, _ in rows)
+            p1_col = "\n".join(v1 for _, v1, _ in rows)
+            p2_col = "\n".join(v2 for _, _, v2 in rows)
+
+            embed = discord.Embed(
+                title=f"⚔️ {s1['name']} vs {s2['name']}",
+                description=f"**{club_name}** — Head to Head",
+                color=discord.Color.blue(),
+            )
+            embed.add_field(name=f"👤 {s1['name']}", value=p1_col, inline=True)
+            embed.add_field(name="📊 Stat",            value=labels_col, inline=True)
+            embed.add_field(name=f"👤 {s2['name']}", value=p2_col, inline=True)
+            embed.set_footer(text=f"Platform: {used_platform} | Career stats")
+
+            await interaction.followup.send(embed=embed)
+
+    except Exception as e:
+        logger.error(f"Error in /headtohead: {e}", exc_info=True)
+        await interaction.followup.send(f"Could not fetch comparison data. Error: {e}", ephemeral=True)
+
+
 # ---------- run ----------
 if __name__ == "__main__":
     if not TOKEN:
