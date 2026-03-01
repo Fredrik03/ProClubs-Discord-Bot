@@ -200,6 +200,14 @@ class ProClubsBot(discord.Client):
                     logger.debug(f"Guild {guild_id} autopost is disabled (autopost={autopost}), skipping")
                     continue
 
+                # Month rollover check (POTM announcement) - runs every poll cycle
+                # Must be outside the EA API try block so it is not skipped by
+                # `continue` statements that fire when no new match is detected.
+                try:
+                    await check_month_rollover(self, guild_id)
+                except Exception as monthly_err:
+                    logger.error(f"[Guild {guild_id}] [Monthly] Error checking month rollover: {monthly_err}", exc_info=True)
+
                 blocked_until = self._ea_forbidden_until.get(int(guild_id), 0.0)
                 now_ts = time.time()
                 if blocked_until > now_ts:
@@ -499,12 +507,6 @@ class ProClubsBot(discord.Client):
                     )
                 except Exception as playoff_err:
                     logger.error(f"[Guild {guild_id}] [Playoffs] Error checking playoff matches: {playoff_err}", exc_info=True)
-
-                # Month rollover check (POTM announcement)
-                try:
-                    await check_month_rollover(self, guild_id)
-                except Exception as monthly_err:
-                    logger.error(f"[Guild {guild_id}] [Monthly] Error checking month rollover: {monthly_err}", exc_info=True)
 
 
 client = ProClubsBot()
