@@ -727,9 +727,9 @@ def update_playoff_stats(guild_id: int, player_name: str, playoff_period: str, g
                 new_total_rating = rating
                 new_matches = 1
             
-            # Calculate playoff score: (Goals × 10) + (Assists × 7) + (Average Rating × 5) + (Matches Played × 2)
+            # Calculate playoff score: (Goals × 10) + (Assists × 10) + (Average Rating × 5) + (Matches Played × 2)
             avg_rating = new_total_rating / new_matches if new_matches > 0 else 0
-            playoff_score = (new_goals * 10) + (new_assists * 7) + (avg_rating * 5) + (new_matches * 2)
+            playoff_score = (new_goals * 10) + (new_assists * 10) + (avg_rating * 5) + (new_matches * 2)
             
             # Insert or update
             db.execute(
@@ -932,9 +932,9 @@ def update_monthly_stats(guild_id: int, player_name: str, month_period: str, goa
                 new_total_rating = rating
                 new_matches = 1
 
-            # Score = (Goals x 10) + (Assists x 7) + (Avg Rating x 5) + (Matches Played x 2)
+            # Score = (Goals x 10) + (Assists x 10) + (Avg Rating x 5) + (Matches Played x 2)
             avg_rating = new_total_rating / new_matches if new_matches > 0 else 0
-            monthly_score = (new_goals * 10) + (new_assists * 7) + (avg_rating * 5) + (new_matches * 2)
+            monthly_score = (new_goals * 10) + (new_assists * 10) + (avg_rating * 5) + (new_matches * 2)
 
             db.execute(
                 """

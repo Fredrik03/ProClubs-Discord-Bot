@@ -200,6 +200,14 @@ class ProClubsBot(discord.Client):
                     logger.debug(f"Guild {guild_id} autopost is disabled (autopost={autopost}), skipping")
                     continue
 
+                # Month rollover check (POTM announcement) - runs every poll cycle
+                # Must be outside the EA API try block so it is not skipped by
+                # `continue` statements that fire when no new match is detected.
+                try:
+                    await check_month_rollover(self, guild_id)
+                except Exception as monthly_err:
+                    logger.error(f"[Guild {guild_id}] [Monthly] Error checking month rollover: {monthly_err}", exc_info=True)
+
                 blocked_until = self._ea_forbidden_until.get(int(guild_id), 0.0)
                 now_ts = time.time()
                 if blocked_until > now_ts:
@@ -500,12 +508,6 @@ class ProClubsBot(discord.Client):
                 except Exception as playoff_err:
                     logger.error(f"[Guild {guild_id}] [Playoffs] Error checking playoff matches: {playoff_err}", exc_info=True)
 
-                # Month rollover check (POTM announcement)
-                try:
-                    await check_month_rollover(self, guild_id)
-                except Exception as monthly_err:
-                    logger.error(f"[Guild {guild_id}] [Monthly] Error checking month rollover: {monthly_err}", exc_info=True)
-
 
 client = ProClubsBot()
 
@@ -801,7 +803,7 @@ async def potm(interaction: discord.Interaction):
     for player in stats:
         pname = player["player_name"]
         recent = get_player_recent_goals_assists(interaction.guild_id, pname, days=7)
-        weekly_scores[pname] = recent["goals"] * 10 + recent["assists"] * 7
+        weekly_scores[pname] = recent["goals"] * 10 + recent["assists"] * 10
 
     embed = discord.Embed(
         title="🏅 Player of the Month Standings",
@@ -848,7 +850,7 @@ async def potm(interaction: discord.Interaction):
             inline=False,
         )
 
-    embed.set_footer(text="Score = Goals×10 + Assists×7 + Avg Rating×5 + Matches×2 | 🔥 = active this week")
+    embed.set_footer(text="Score = Goals×10 + Assists×10 + Avg Rating×5 + Matches×2 | 🔥 = active this week")
     await interaction.followup.send(embed=embed)
 
 
@@ -1650,7 +1652,7 @@ async def leaderboard(
                     m_goals = int(m.get("goals", 0))
                     m_assists = int(m.get("assists", 0))
                     m_rating = float(m.get("ratingAve", 0))
-                    m_score = m_goals * 10 + m_assists * 7 + m_rating * 5 + m_matches * 2
+                    m_score = m_goals * 10 + m_assists * 10 + m_rating * 5 + m_matches * 2
 
                 m["_matches"] = m_matches
                 m["_goals"] = m_goals

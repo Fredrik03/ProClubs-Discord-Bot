@@ -48,7 +48,7 @@ def calculate_player_of_playoffs(guild_id: int, playoff_period: str) -> dict | N
     Returns the best player's stats or None if no players found.
     
     Scoring Algorithm:
-    Playoff Score = (Goals × 10) + (Assists × 7) + (Average Rating × 5) + (Matches Played × 2)
+    Playoff Score = (Goals × 10) + (Assists × 10) + (Average Rating × 5) + (Matches Played × 2)
     """
     try:
         stats = get_playoff_stats(guild_id, playoff_period)
@@ -165,7 +165,7 @@ async def announce_player_of_playoffs(client, guild_id: int, playoff_period: str
                 inline=False
             )
         
-        embed.set_footer(text="Playoff performance calculated using: Goals×10 + Assists×7 + Avg Rating×5 + Matches×2")
+        embed.set_footer(text="Playoff performance calculated using: Goals×10 + Assists×10 + Avg Rating×5 + Matches×2")
         
         # Post the announcement
         await channel.send(embed=embed)

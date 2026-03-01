@@ -8,7 +8,7 @@ This module handles:
 4. Announcing the results to the configured monthly channel
 
 Scoring Algorithm (same as playoffs):
-Score = (Goals x 10) + (Assists x 7) + (Avg Rating x 5) + (Matches Played x 2)
+Score = (Goals x 10) + (Assists x 10) + (Avg Rating x 5) + (Matches Played x 2)
 """
 import logging
 import discord
@@ -154,7 +154,7 @@ async def announce_player_of_month(client, guild_id: int, month_period: str):
                 inline=False
             )
 
-        embed.set_footer(text="Score = Goals×10 + Assists×7 + Avg Rating×5 + Matches×2")
+        embed.set_footer(text="Score = Goals×10 + Assists×10 + Avg Rating×5 + Matches×2")
 
         await channel.send(embed=embed)
         mark_monthly_announced(guild_id, month_period)
