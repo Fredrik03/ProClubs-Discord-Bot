@@ -803,7 +803,7 @@ async def potm(interaction: discord.Interaction):
     for player in stats:
         pname = player["player_name"]
         recent = get_player_recent_goals_assists(interaction.guild_id, pname, days=7)
-        weekly_scores[pname] = recent["goals"] * 10 + recent["assists"] * 7
+        weekly_scores[pname] = recent["goals"] * 10 + recent["assists"] * 10
 
     embed = discord.Embed(
         title="🏅 Player of the Month Standings",
@@ -850,7 +850,7 @@ async def potm(interaction: discord.Interaction):
             inline=False,
         )
 
-    embed.set_footer(text="Score = Goals×10 + Assists×7 + Avg Rating×5 + Matches×2 | 🔥 = active this week")
+    embed.set_footer(text="Score = Goals×10 + Assists×10 + Avg Rating×5 + Matches×2 | 🔥 = active this week")
     await interaction.followup.send(embed=embed)
 
 
@@ -1652,7 +1652,7 @@ async def leaderboard(
                     m_goals = int(m.get("goals", 0))
                     m_assists = int(m.get("assists", 0))
                     m_rating = float(m.get("ratingAve", 0))
-                    m_score = m_goals * 10 + m_assists * 7 + m_rating * 5 + m_matches * 2
+                    m_score = m_goals * 10 + m_assists * 10 + m_rating * 5 + m_matches * 2
 
                 m["_matches"] = m_matches
                 m["_goals"] = m_goals
