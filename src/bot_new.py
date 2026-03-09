@@ -1041,13 +1041,13 @@ async def backfillplayoffstats(interaction: discord.Interaction):
                 new_achievements = check_achievements(guild_id, player_name, member, match_data=match)
                 if new_achievements:
                     achievements_found += len(new_achievements)
-                    await announce_achievements(self, guild_id, player_name, new_achievements)
+                    await announce_achievements(client, guild_id, player_name, new_achievements)
 
                 # Check milestones
                 new_milestones = check_milestones(guild_id, player_name, member)
                 if new_milestones:
                     milestones_found += len(new_milestones)
-                    await announce_milestones(self, guild_id, player_name, new_milestones)
+                    await announce_milestones(client, guild_id, player_name, new_milestones)
 
                 # Update match history
                 for pid, pdata in club_players.items():
