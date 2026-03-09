@@ -83,6 +83,7 @@ from database import (
     get_all_players_hat_trick_stats, set_last_playoff_match_id,
     get_monthly_stats, get_player_dominant_position,
     get_potm_history, get_player_recent_goals_assists,
+    record_playoff_match, update_playoff_stats,
 )
 from milestones import check_milestones, announce_milestones
 from achievements import (
