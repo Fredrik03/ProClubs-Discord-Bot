@@ -350,12 +350,11 @@ class ProClubsBot(discord.Client):
                         logger.error(f"[Guild {guild_id}] Failed to update last_match_id in database: {db_error}", exc_info=True)
                         # Don't continue here - match was posted, just DB update failed
                     
-                    # Track monthly stats for league matches (not playoffs)
-                    if not is_playoff_match(mt):
-                        process_league_match_monthly(guild_id, match, club_id)
+                    # Track monthly stats for all matches (league + playoffs)
+                    process_league_match_monthly(guild_id, match, club_id)
 
-                        # A league match after playoffs means playoffs are over.
-                        # Auto-announce playoff summary if there are unannounced playoff stats.
+                    # A league match after playoffs means playoffs are over.
+                    if not is_playoff_match(mt):
                         try:
                             playoff_period = detect_playoff_period()
                             playoff_count = count_playoff_matches(guild_id, playoff_period)
