@@ -4,6 +4,7 @@ Discord embed builders for match results and stats.
 import discord
 from collections.abc import Callable
 from datetime import datetime, timezone
+from utils.ea_api import interpret_match_result
 
 
 class PaginatedEmbedView(discord.ui.View):
@@ -112,19 +113,16 @@ def build_match_embed(club_id: int, platform: str, match: dict, match_type: str,
     opp_score = opponent_club.get("score", "?")
     
     # Determine result
-    result = our_club.get("result", "")
-    if result == "1":
+    match_res = interpret_match_result(our_club)
+    if match_res == "W":
         res = "✅ Win"
         color = 0x2ecc71  # Green
-    elif result == "2":
+    elif match_res == "L":
         res = "❌ Loss"
         color = 0xe74c3c  # Red
-    elif result == "3":
+    else:
         res = "🤝 Draw"
         color = 0xf1c40f  # Yellow
-    else:
-        res = "❓"
-        color = 0x95a5a6  # Gray
     
     # Time
     when = utc_to_str(match.get("timestamp", 0))

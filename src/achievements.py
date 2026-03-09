@@ -18,6 +18,7 @@ Each achievement is only announced once per player.
 import logging
 import discord
 from datetime import datetime, timezone
+from utils.ea_api import interpret_match_result
 from database import (
     has_achievement_been_earned, record_achievement, get_settings,
     get_player_achievement_history, get_player_match_history,
@@ -480,30 +481,30 @@ def check_match_achievements(guild_id: int, player_name: str, match_data: dict) 
         
         our_score = int(our_club.get("score", 0) or 0)
         opp_score = int(opponent_club.get("score", 0) or 0)
-        result = our_club.get("result", "")
-        
+        result = interpret_match_result(our_club)
+
         # Demolition - Win 10-0 or better
-        if result == "1" and our_score >= 10 and opp_score == 0:
+        if result == "W" and our_score >= 10 and opp_score == 0:
             if not has_achievement_been_earned(guild_id, player_name, "demolition"):
                 achievements.append({
                     "id": "demolition",
                     **ACHIEVEMENTS["demolition"]
                 })
-        
+
         # Giant Killer - Beat team with 500+ skill rating difference
         our_rating = int(our_club.get("skillrating", 0) or 0)
         opp_rating = int(opponent_club.get("skillrating", 0) or 0)
         rating_diff = opp_rating - our_rating
-        
-        if result == "1" and rating_diff >= 500:
+
+        if result == "W" and rating_diff >= 500:
             if not has_achievement_been_earned(guild_id, player_name, "giant_killer"):
                 achievements.append({
                     "id": "giant_killer",
                     **ACHIEVEMENTS["giant_killer"]
                 })
-        
+
         # Nil-Nil Nightmare - 0-0 draw
-        if result == "3" and our_score == 0 and opp_score == 0:
+        if result == "D" and our_score == 0 and opp_score == 0:
             if not has_achievement_been_earned(guild_id, player_name, "nil_nil"):
                 achievements.append({
                     "id": "nil_nil",
@@ -511,7 +512,7 @@ def check_match_achievements(guild_id: int, player_name: str, match_data: dict) 
                 })
 
         # Comeback Kings - Win a match where opponent also scored
-        if result == "1" and opp_score > 0:
+        if result == "W" and opp_score > 0:
             if not has_achievement_been_earned(guild_id, player_name, "comeback_kings"):
                 achievements.append({
                     "id": "comeback_kings",

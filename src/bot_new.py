@@ -89,7 +89,8 @@ from achievements import (
     check_achievements, announce_achievements,
     check_historical_achievements, announce_historical_achievements
 )
-from playoffs import is_playoff_match, process_playoff_match
+from playoffs import is_playoff_match, process_playoff_match, detect_playoff_period, calculate_player_of_playoffs
+from database import count_playoff_matches, get_playoff_stats, get_playoff_club_stats
 from monthly import (
     process_league_match_monthly, check_month_rollover, detect_month_period
 )
@@ -97,7 +98,7 @@ from utils.ea_api import (
     platform_from_choice, parse_club_id_from_any, warmup_session,
     fetch_club_info, fetch_latest_match, fetch_latest_playoff_match,
     fetch_json, HTTP_TIMEOUT, EAApiForbiddenError,
-    fetch_all_matches, calculate_player_wld
+    fetch_all_matches, calculate_player_wld, interpret_match_result,
 )
 from utils.embeds import build_match_embed, utc_to_str, PaginatedEmbedView
 
@@ -408,15 +409,7 @@ class ProClubsBot(discord.Client):
                             club_players = players.get(str(club_id), {})
 
                             # Determine match result for team-streak tracking
-                            result_code = our_club.get("result", "")
-                            if result_code == "1":
-                                match_result = "W"
-                            elif result_code == "2":
-                                match_result = "L"
-                            elif result_code == "3":
-                                match_result = "D"
-                            else:
-                                match_result = "L"
+                            match_result = interpret_match_result(our_club)
 
                             for pid, pdata in club_players.items():
                                 if isinstance(pdata, dict) and pdata.get("playername", "").lower() == player_name.lower():
@@ -885,6 +878,69 @@ async def setplayoffsummarychannel(interaction: discord.Interaction, channel: di
         f"*Summaries are posted automatically after 15 playoff matches each month.*",
         ephemeral=True
     )
+
+
+@client.tree.command(name="playoffsummary", description="Show playoff stats for the current period")
+async def playoffsummary(interaction: discord.Interaction):
+    """
+    Command: /playoffsummary
+    Shows playoff performance summary including Player of the Playoffs and club stats.
+    """
+    await interaction.response.defer()
+    guild_id = interaction.guild_id
+
+    st = get_settings(guild_id)
+    if not st or not st.get("club_id"):
+        await interaction.followup.send("Set a club first with `/setclub`.", ephemeral=True)
+        return
+
+    playoff_period = detect_playoff_period()
+    total = count_playoff_matches(guild_id, playoff_period)
+
+    if total == 0:
+        await interaction.followup.send(f"No playoff matches tracked for **{playoff_period}** yet.")
+        return
+
+    # Build embed
+    embed = discord.Embed(
+        title="Playoff Summary",
+        description=f"**{playoff_period}** | {total} matches played",
+        color=discord.Color.gold(),
+        timestamp=datetime.now(timezone.utc),
+    )
+
+    # Club stats
+    club_stats = get_playoff_club_stats(guild_id, playoff_period)
+    if club_stats:
+        embed.add_field(
+            name=f"Club Performance ({club_stats['total_matches']} matches)",
+            value=(
+                f"**{club_stats['wins']}W - {club_stats['losses']}L - {club_stats['draws']}D** "
+                f"({club_stats['win_rate']:.0f}% win rate)\n"
+                f"Goals: **{club_stats['goals_for']} - {club_stats['goals_against']}** "
+                f"(GD: **{club_stats['goal_difference']:+d}**)\n"
+                f"**{club_stats['clean_sheets']}** clean sheets"
+            ),
+            inline=False,
+        )
+
+    # Player leaderboard
+    all_stats = get_playoff_stats(guild_id, playoff_period)
+    if all_stats:
+        medals = ["1.", "2.", "3."]
+        board = ""
+        for i, p in enumerate(all_stats):
+            prefix = medals[i] if i < len(medals) else f"{i+1}."
+            avg_r = p['total_rating'] / p['matches_played'] if p['matches_played'] > 0 else 0
+            board += (
+                f"**{prefix} {p['player_name']}** — "
+                f"{p['goals']}G {p['assists']}A | {avg_r:.1f} avg | "
+                f"{p['matches_played']}M | Score: **{p['playoff_score']:.0f}**\n"
+            )
+        embed.add_field(name="Player Rankings", value=board, inline=False)
+
+    embed.set_footer(text="Score = Goals\u00d710 + Assists\u00d710 + AvgRating\u00d75 + Matches\u00d72")
+    await interaction.followup.send(embed=embed)
 
 
 @client.tree.command(name="clubstats", description="Show overall club statistics")
@@ -1445,10 +1501,10 @@ async def lastmatches(interaction: discord.Interaction, match_type: app_commands
                 oc = clubs_s.get(str(club_id), {})
                 opp_ids = [cid for cid in clubs_s.keys() if str(cid) != str(club_id)]
                 opc = clubs_s.get(opp_ids[0], {}) if opp_ids else {}
-                r = oc.get("result", "")
-                if r == "1": total_w += 1
-                elif r == "2": total_l += 1
-                elif r == "3": total_d += 1
+                r = interpret_match_result(oc)
+                if r == "W": total_w += 1
+                elif r == "L": total_l += 1
+                elif r == "D": total_d += 1
                 try: total_gf += int(oc.get("score", 0) or 0)
                 except ValueError: pass
                 try: total_ga += int(opc.get("score", 0) or 0)
@@ -1470,19 +1526,16 @@ async def lastmatches(interaction: discord.Interaction, match_type: app_commands
                 our_score = our_club.get("score", "?")
                 opp_score = opponent_club.get("score", "?")
 
-                result = our_club.get("result", "")
-                if result == "1":
+                match_res = interpret_match_result(our_club)
+                if match_res == "W":
                     result_emoji = "✅"
                     color = 0x2ecc71
-                elif result == "2":
+                elif match_res == "L":
                     result_emoji = "❌"
                     color = 0xe74c3c
-                elif result == "3":
+                else:
                     result_emoji = "🤝"
                     color = 0xf1c40f
-                else:
-                    result_emoji = "❓"
-                    color = 0x95a5a6
 
                 time_ago = match.get("timeAgo", {})
                 time_str = (
@@ -1941,15 +1994,13 @@ async def lastperformance(interaction: discord.Interaction, player_name: str, ma
             for match in matches:
                 clubs = match.get("clubs", {})
                 our_club = clubs.get(str(club_id), {})
-                result_code = our_club.get("result", "")
-                if result_code == "1":
+                match_res = interpret_match_result(our_club)
+                if match_res == "W":
                     result_emoji = "✅"
-                elif result_code == "2":
+                elif match_res == "L":
                     result_emoji = "❌"
-                elif result_code == "3":
-                    result_emoji = "🤝"
                 else:
-                    result_emoji = "❓"
+                    result_emoji = "🤝"
 
                 opponent_ids = [cid for cid in clubs.keys() if str(cid) != str(club_id)]
                 opponent_club = clubs.get(opponent_ids[0], {}) if opponent_ids else {}
