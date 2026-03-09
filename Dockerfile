@@ -13,6 +13,7 @@ RUN python -m playwright install chrome
 
 # Copy source code
 COPY src/ ./src/
+COPY backfill_playoffs.py ./
 
 # Run the bot
 CMD ["python", "src/bot_new.py"]
