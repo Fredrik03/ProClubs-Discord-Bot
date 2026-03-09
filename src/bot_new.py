@@ -90,7 +90,7 @@ from achievements import (
     check_historical_achievements, announce_historical_achievements
 )
 from playoffs import is_playoff_match, process_playoff_match, detect_playoff_period, calculate_player_of_playoffs
-from database import count_playoff_matches, get_playoff_stats, get_playoff_club_stats
+from database import count_playoff_matches, get_playoff_stats, get_playoff_club_stats, get_tracked_playoff_match_ids
 from monthly import (
     process_league_match_monthly, check_month_rollover, detect_month_period
 )
@@ -941,6 +941,130 @@ async def playoffsummary(interaction: discord.Interaction):
 
     embed.set_footer(text="Score = Goals\u00d710 + Assists\u00d710 + AvgRating\u00d75 + Matches\u00d72")
     await interaction.followup.send(embed=embed)
+
+
+@client.tree.command(name="backfillplayoffs", description="Backfill missed playoff matches and post them to the channel")
+async def backfillplayoffs(interaction: discord.Interaction):
+    """
+    Command: /backfillplayoffs
+    Fetches all playoff matches from the EA API, records stats, and posts
+    match embeds for any matches not yet tracked.
+    """
+    await interaction.response.defer()
+    guild_id = interaction.guild_id
+
+    st = get_settings(guild_id)
+    if not st or not st.get("club_id"):
+        await interaction.followup.send("Set a club first with `/setclub`.", ephemeral=True)
+        return
+
+    club_id = int(st["club_id"])
+    platform = st["platform"]
+    channel_id = st.get("channel_id")
+
+    if not channel_id:
+        await interaction.followup.send("Set a match channel first with `/setchannel`.", ephemeral=True)
+        return
+
+    try:
+        channel = interaction.guild.get_channel(int(channel_id))
+        if channel is None:
+            channel = await interaction.guild.fetch_channel(int(channel_id))
+    except Exception:
+        await interaction.followup.send(f"Could not access channel <#{channel_id}>.", ephemeral=True)
+        return
+
+    async with aiohttp.ClientSession(timeout=HTTP_TIMEOUT) as session:
+        await warmup_session(session)
+
+        # Get club name
+        info, used_platform = await fetch_club_info(session, platform, club_id)
+        if isinstance(info, dict):
+            club_info = info.get(str(club_id), {})
+        elif isinstance(info, list):
+            club_info = next((e for e in info if str(e.get("clubId")) == str(club_id)), {})
+        else:
+            club_info = {}
+        club_name = club_info.get("name", f"Club {club_id}")
+
+        # Fetch all playoff matches
+        params = {
+            "platform": platform,
+            "clubIds": str(club_id),
+            "maxResultCount": "50",
+            "matchType": "playoffMatch",
+        }
+        try:
+            data = await fetch_json(session, "/clubs/matches", params)
+        except Exception as e:
+            await interaction.followup.send(f"Failed to fetch playoff matches: {e}")
+            return
+
+        matches = data if isinstance(data, list) else data.get("matches", [])
+        if not matches:
+            await interaction.followup.send("No playoff matches found in the EA API.")
+            return
+
+        # Process oldest first
+        matches.reverse()
+
+        # Get already-tracked match IDs to avoid duplicates
+        already_tracked = get_tracked_playoff_match_ids(guild_id)
+
+        posted = 0
+        skipped = 0
+        for match in matches:
+            match_id = match.get("matchId", "unknown")
+
+            # Skip matches already in the database
+            if str(match_id) in already_tracked:
+                skipped += 1
+                continue
+
+            ts = int(match.get("timestamp", 0))
+            dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+            playoff_period = dt.strftime("%Y-%m")
+
+            clubs = match.get("clubs", {})
+            players_data = match.get("players", {})
+            our_club = clubs.get(str(club_id), {})
+            if not our_club:
+                continue
+
+            result = interpret_match_result(our_club)
+            our_score = int(our_club.get("score", 0) or 0)
+            opp_ids = [cid for cid in clubs if str(cid) != str(club_id)]
+            opp_club = clubs.get(opp_ids[0], {}) if opp_ids else {}
+            opp_score = int(opp_club.get("score", 0) or 0)
+            clean_sheet = (opp_score == 0)
+
+            # Record stats
+            record_playoff_match(guild_id, playoff_period, str(match_id), result, our_score, opp_score, clean_sheet)
+            club_players = players_data.get(str(club_id), {})
+            for pid, pdata in club_players.items():
+                if isinstance(pdata, dict):
+                    pname = pdata.get("playername", "Unknown")
+                    goals = int(pdata.get("goals", 0) or 0)
+                    assists = int(pdata.get("assists", 0) or 0)
+                    rating = float(pdata.get("rating", 0) or 0)
+                    update_playoff_stats(guild_id, pname, playoff_period, goals, assists, rating)
+
+            # Post match embed to channel
+            try:
+                embed = build_match_embed(club_id, used_platform, match, "playoffMatch", club_name_hint=club_name)
+                await channel.send(embed=embed)
+                posted += 1
+            except Exception as e:
+                logger.error(f"[Backfill] Failed to post match {match_id}: {e}")
+
+        # Update last playoff match ID to newest
+        newest_id = matches[-1].get("matchId", "")
+        set_last_playoff_match_id(guild_id, str(newest_id))
+
+    msg = f"Backfilled **{posted}** playoff matches to {channel.mention}."
+    if skipped:
+        msg += f" ({skipped} already tracked, skipped.)"
+    await interaction.followup.send(msg)
 
 
 @client.tree.command(name="clubstats", description="Show overall club statistics")

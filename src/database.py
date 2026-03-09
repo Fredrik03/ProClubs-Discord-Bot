@@ -848,6 +848,20 @@ def record_playoff_match(guild_id: int, playoff_period: str, match_id: str, resu
         raise
 
 
+def get_tracked_playoff_match_ids(guild_id: int) -> set:
+    """Return set of all playoff match IDs already tracked for a guild."""
+    try:
+        with sqlite3.connect(DB_PATH) as db:
+            cur = db.execute(
+                "SELECT DISTINCT match_id FROM playoff_club_stats WHERE guild_id=?",
+                (guild_id,)
+            )
+            return {row[0] for row in cur.fetchall()}
+    except Exception as e:
+        logger.error(f"[Database] Failed to get tracked playoff match IDs: {e}", exc_info=True)
+        return set()
+
+
 def get_playoff_club_stats(guild_id: int, playoff_period: str) -> dict:
     """Get aggregated club statistics for a playoff period."""
     try:
