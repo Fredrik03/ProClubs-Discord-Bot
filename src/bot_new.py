@@ -954,6 +954,124 @@ async def playoffsummary(interaction: discord.Interaction):
     await interaction.followup.send(embed=embed)
 
 
+@client.tree.command(name="backfillplayoffstats", description="Retroactively process playoff matches for POTM, achievements, and match history")
+async def backfillplayoffstats(interaction: discord.Interaction):
+    """
+    Command: /backfillplayoffstats
+    One-time command to retroactively process already-tracked playoff matches
+    through monthly stats, achievements, milestones, and match history.
+    """
+    await interaction.response.defer()
+    guild_id = interaction.guild_id
+
+    st = get_settings(guild_id)
+    if not st or not st.get("club_id"):
+        await interaction.followup.send("Set a club first with `/setclub`.", ephemeral=True)
+        return
+
+    club_id = int(st["club_id"])
+    platform = st["platform"]
+
+    async with aiohttp.ClientSession(timeout=HTTP_TIMEOUT) as session:
+        await warmup_session(session)
+
+        # Fetch all playoff matches from API
+        params = {
+            "platform": platform,
+            "clubIds": str(club_id),
+            "maxResultCount": "50",
+            "matchType": "playoffMatch",
+        }
+        try:
+            data = await fetch_json(session, "/clubs/matches", params)
+        except Exception as e:
+            await interaction.followup.send(f"Failed to fetch playoff matches: {e}")
+            return
+
+        matches = data if isinstance(data, list) else data.get("matches", [])
+        if not matches:
+            await interaction.followup.send("No playoff matches found in the EA API.")
+            return
+
+        # Fetch member stats for milestones/achievements
+        try:
+            members_data = await fetch_json(
+                session,
+                "/members/stats",
+                {"clubId": str(club_id), "platform": platform},
+            )
+            if isinstance(members_data, list):
+                members_list = members_data
+            else:
+                members_list = members_data.get("members") if isinstance(members_data, dict) else []
+            members = [m for m in members_list if isinstance(m, dict)]
+        except Exception:
+            members = []
+
+        # Process oldest first
+        matches.reverse()
+
+        processed = 0
+        achievements_found = 0
+        milestones_found = 0
+
+        for match in matches:
+            match_id = match.get("matchId", "unknown")
+            clubs = match.get("clubs", {})
+            our_club = clubs.get(str(club_id), {})
+            if not our_club:
+                continue
+
+            # 1. Monthly stats (POTM)
+            process_league_match_monthly(guild_id, match, club_id)
+
+            # 2. Match history + achievements + milestones
+            players_data = match.get("players", {})
+            club_players = players_data.get(str(club_id), {})
+            opponent_id = [cid for cid in clubs.keys() if str(cid) != str(club_id)]
+            opponent_club = clubs.get(opponent_id[0], {}) if opponent_id else {}
+            opp_score = int(opponent_club.get("score", 0) or 0)
+            clean_sheet = (opp_score == 0)
+            match_result = interpret_match_result(our_club)
+
+            for member in members:
+                player_name = member.get("name", "Unknown")
+
+                # Check achievements
+                new_achievements = check_achievements(guild_id, player_name, member, match_data=match)
+                if new_achievements:
+                    achievements_found += len(new_achievements)
+                    await announce_achievements(self, guild_id, player_name, new_achievements)
+
+                # Check milestones
+                new_milestones = check_milestones(guild_id, player_name, member)
+                if new_milestones:
+                    milestones_found += len(new_milestones)
+                    await announce_milestones(self, guild_id, player_name, new_milestones)
+
+                # Update match history
+                for pid, pdata in club_players.items():
+                    if isinstance(pdata, dict) and pdata.get("playername", "").lower() == player_name.lower():
+                        match_goals = int(pdata.get("goals", 0) or 0)
+                        match_assists = int(pdata.get("assists", 0) or 0)
+                        match_rating = float(pdata.get("rating", 0) or 0)
+                        position = (pdata.get("pos") or pdata.get("position") or "Unknown")
+
+                        update_player_match_history(
+                            guild_id, player_name, str(match_id),
+                            match_goals, match_assists, clean_sheet, position, match_result,
+                            rating=match_rating,
+                        )
+                        break
+
+            processed += 1
+
+    await interaction.followup.send(
+        f"Backfilled **{processed}** playoff matches into POTM/match history.\n"
+        f"Achievements found: **{achievements_found}** | Milestones found: **{milestones_found}**"
+    )
+
+
 @client.tree.command(name="clubstats", description="Show overall club statistics")
 async def clubstats(interaction: discord.Interaction):
     """
