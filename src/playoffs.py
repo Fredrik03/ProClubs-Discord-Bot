@@ -3,9 +3,9 @@ Playoff tracking and Player of the Playoffs announcement logic.
 
 This module handles:
 1. Detecting playoff periods (monthly tracking)
-2. Checking if 15 playoff matches have been completed
+2. Tracking all playoff matches (variable count per league)
 3. Calculating Player of the Playoffs using the scoring algorithm
-4. Announcing the results to the configured channel
+4. Announcing the results via /playoffsummary command
 """
 import logging
 import discord
@@ -15,6 +15,7 @@ from database import (
     count_playoff_matches, get_settings, record_playoff_match, get_playoff_club_stats,
     update_playoff_stats
 )
+from utils.ea_api import interpret_match_result
 
 logger = logging.getLogger('ProClubsBot.Playoffs')
 
@@ -30,16 +31,11 @@ def detect_playoff_period() -> str:
 
 def check_playoff_completion(guild_id: int, playoff_period: str) -> bool:
     """
-    Check if 15 playoff matches have been played in the current period.
-    Returns True if playoffs are complete and ready for announcement.
+    Check if playoff matches have been played in the current period.
+    No longer hardcodes a match count — completion is triggered manually
+    via /playoffsummary since different leagues have different playoff lengths.
     """
-    try:
-        total_matches = count_playoff_matches(guild_id, playoff_period)
-        logger.debug(f"[Playoffs] Guild {guild_id} playoff period {playoff_period}: {total_matches}/15 matches played")
-        return total_matches >= 15
-    except Exception as e:
-        logger.error(f"[Playoffs] Failed to check playoff completion: {e}", exc_info=True)
-        return False
+    return False
 
 
 def calculate_player_of_playoffs(guild_id: int, playoff_period: str) -> dict | None:
@@ -213,23 +209,13 @@ async def process_playoff_match(client, guild_id: int, match_data: dict, match_t
             return
         
         # Extract match result and scores
-        result_code = our_club.get("result", "")
+        result = interpret_match_result(our_club)
         our_score = int(our_club.get("score", 0) or 0)
-        
+
         # Find opponent's score
         opponent_ids = [cid for cid in clubs.keys() if str(cid) != str(club_id)]
         opponent_club = clubs.get(opponent_ids[0], {}) if opponent_ids else {}
         opp_score = int(opponent_club.get("score", 0) or 0)
-        
-        # Convert result code to W/L/D
-        if result_code == "1":
-            result = "W"
-        elif result_code == "2":
-            result = "L"
-        elif result_code == "3":
-            result = "D"
-        else:
-            result = "L"  # Default to loss for unknown results
         
         # Check for clean sheet
         clean_sheet = (opp_score == 0)

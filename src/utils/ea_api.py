@@ -118,6 +118,29 @@ class EAApiHttpError(RuntimeError):
         self.url = url
 
 
+def interpret_match_result(club_data: dict) -> str:
+    """Interpret match result from EA API club data.
+
+    EA API result codes:
+      "1" = Win, "2" = Loss, "3" = Draw, "4" = DNF/Forfeit loss
+    DNF wins (opponent disconnects) use non-standard codes like "16385"
+    but always have winnerByDnf="1".
+
+    Returns "W", "L", or "D".
+    """
+    result_code = str(club_data.get("result", ""))
+    winner_by_dnf = str(club_data.get("winnerByDnf", "0"))
+
+    if result_code == "1" or winner_by_dnf == "1":
+        return "W"
+    elif result_code == "2" or result_code == "4":
+        return "L"
+    elif result_code == "3":
+        return "D"
+    else:
+        return "L"
+
+
 def platform_from_choice(gen: str | None) -> str:
     """Convert generation choice to platform string."""
     g = (gen or "gen5").lower()
@@ -684,23 +707,17 @@ def calculate_player_wld(matches, club_id: int, player_name: str):
         
         matches_played += 1
         
-        # Determine result
-        result = str(our_club.get("result", ""))
-        if result == "1":  # Win
+        # Determine result (handles DNF wins with result=16385 + winnerByDnf=1)
+        result = interpret_match_result(our_club)
+        if result == "W":
             wins += 1
             logger.debug(f"Match {idx+1}: WIN")
-        elif result == "2":  # Loss
+        elif result == "L":
             losses += 1
             logger.debug(f"Match {idx+1}: LOSS")
-        elif result == "3":  # Draw
+        elif result == "D":
             draws += 1
             logger.debug(f"Match {idx+1}: DRAW")
-        elif result == "4":  # DNF/Forfeit - count as loss
-            losses += 1
-            logger.debug(f"Match {idx+1}: DNF/FORFEIT (counted as loss)")
-        else:
-            # Unknown result, don't count but log it
-            logger.warning(f"Match {idx+1}: Unknown result '{result}' - skipping")
     
     logger.info(f"Final stats for {player_name}: {wins}W-{losses}L-{draws}D from {matches_played} matches")
     return wins, losses, draws, matches_played
