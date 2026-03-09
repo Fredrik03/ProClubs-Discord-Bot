@@ -557,21 +557,34 @@ async def fetch_latest_playoff_match(session, platform: str, club_id: int):
         "matchType": "playoffMatch"
     }
 
-    try:
-        payload = await fetch_json(session, "/clubs/matches", params)
-        matches = payload if isinstance(payload, list) else payload.get("matches", [])
+    for endpoint_path in ("/clubs/matches", "/matches"):
+        try:
+            payload = await fetch_json(session, endpoint_path, params)
+            matches = payload if isinstance(payload, list) else payload.get("matches", [])
 
-        if matches and len(matches) > 0:
-            newest = matches[0]
-            match_id = newest.get("matchId", "unknown")
-            logger.info(f"[EA API] ✅ Found latest playoff match for club {club_id}: match_id={match_id}")
-            return newest, "playoffMatch"
-        else:
-            logger.debug(f"[EA API] No playoff matches found for club {club_id}")
+            if matches and len(matches) > 0:
+                newest = matches[0]
+                match_id = newest.get("matchId", "unknown")
+                logger.info(f"[EA API] ✅ Found latest playoff match for club {club_id}: match_id={match_id}")
+                return newest, "playoffMatch"
+            else:
+                logger.debug(f"[EA API] No playoff matches found for club {club_id} via {endpoint_path}")
+                return None, None
+        except EAApiForbiddenError:
+            raise
+        except RuntimeError as e:
+            error_msg = str(e)
+            if "400" in error_msg or "Bad Request" in error_msg:
+                logger.warning(f"[EA API] HTTP 400 fetching playoff matches via {endpoint_path}, trying fallback endpoint...")
+                continue
+            logger.warning(f"[EA API] Failed to fetch playoff matches for club {club_id} via {endpoint_path}: {e}")
             return None, None
-    except Exception as e:
-        logger.debug(f"[EA API] Failed to fetch playoff matches for club {club_id}: {e}")
-        return None, None
+        except Exception as e:
+            logger.warning(f"[EA API] Failed to fetch playoff matches for club {club_id} via {endpoint_path}: {e}")
+            return None, None
+
+    logger.warning(f"[EA API] All endpoints failed to fetch playoff matches for club {club_id}")
+    return None, None
 
 
 async def fetch_all_matches(session, platform: str, club_id: int, max_count: int = 100, match_type: str = None):
