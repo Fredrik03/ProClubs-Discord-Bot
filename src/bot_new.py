@@ -220,6 +220,80 @@ class ProClubsBot(discord.Client):
                     )
                     continue
                 
+                # Playoff match check — runs every poll cycle, not skipped by league continue
+                try:
+                    settings = get_settings(guild_id)
+                    tracked_playoff_ids = get_tracked_playoff_match_ids(guild_id)
+                    last_playoff_id = settings.get("last_playoff_match_id") if settings else None
+
+                    playoff_matches = await fetch_all_matches(
+                        session, platform, club_id, max_count=10, match_type="playoffMatch"
+                    )
+
+                    if playoff_matches:
+                        # Process oldest-first so last_playoff_match_id ends up as the newest
+                        new_playoff_matches = []
+                        for pm in reversed(playoff_matches):
+                            pm_id = pm.get("matchId", str(pm.get("timestamp", 0)))
+                            if str(pm_id) not in {str(tid) for tid in tracked_playoff_ids} and str(pm_id) != str(last_playoff_id):
+                                new_playoff_matches.append(pm)
+
+                        if new_playoff_matches:
+                            # Fetch club name once for all embeds
+                            try:
+                                po_info, po_platform = await fetch_club_info(session, platform, club_id)
+                                if isinstance(po_info, dict):
+                                    po_club_info = po_info.get(str(club_id), {})
+                                elif isinstance(po_info, list):
+                                    po_club_info = next((e for e in po_info if str(e.get("clubId")) == str(club_id)), {})
+                                else:
+                                    po_club_info = {}
+                                po_club_name = po_club_info.get("name", f"Club {club_id}")
+                            except Exception:
+                                po_club_name = f"Club {club_id}"
+                                po_platform = platform
+
+                            po_channel = None
+                            try:
+                                po_channel = self.get_channel(int(channel_id))
+                                if po_channel is None:
+                                    po_channel = await self.fetch_channel(int(channel_id))
+                            except Exception as ch_err:
+                                logger.error(f"[Guild {guild_id}] [Playoffs] Failed to get channel: {ch_err}")
+
+                            for pm in new_playoff_matches:
+                                pm_id = pm.get("matchId", str(pm.get("timestamp", 0)))
+                                logger.info(f"[Guild {guild_id}] [Playoffs] Playoff match detected: {pm_id}")
+
+                                # Post embed
+                                if po_channel:
+                                    try:
+                                        playoff_embed = build_match_embed(
+                                            club_id, po_platform, pm, "playoffMatch",
+                                            club_name_hint=po_club_name,
+                                        )
+                                        await po_channel.send(embed=playoff_embed)
+                                        logger.info(f"✅ [Guild {guild_id}] [Playoffs] Posted playoff match {pm_id}")
+                                    except Exception as playoff_post_err:
+                                        logger.error(f"[Guild {guild_id}] [Playoffs] Failed to post playoff match: {playoff_post_err}", exc_info=True)
+
+                                # Update last playoff match ID
+                                set_last_playoff_match_id(guild_id, str(pm_id))
+
+                                # Track monthly stats (POTM) for playoff matches too
+                                process_league_match_monthly(guild_id, pm, club_id)
+
+                                # Process playoff stats
+                                await process_playoff_match(self, guild_id, pm, "playoffMatch", club_id)
+                except EAApiForbiddenError as e:
+                    self._ea_forbidden_until[int(guild_id)] = time.time() + EA_FORBIDDEN_COOLDOWN_SECONDS
+                    logger.error(
+                        f"[Guild {guild_id}] [Playoffs] EA API returned 403 ({e.path}). "
+                        f"Pausing this guild for {EA_FORBIDDEN_COOLDOWN_SECONDS}s before retry."
+                    )
+                except Exception as playoff_err:
+                    logger.error(f"[Guild {guild_id}] [Playoffs] Error checking playoff matches: {playoff_err}", exc_info=True)
+
                 try:
                     # Step 1: Fetch club info to get club name
                     logger.debug(f"[Guild {guild_id}] Fetching club info for club {club_id}...")
@@ -460,80 +534,6 @@ class ProClubsBot(discord.Client):
                 except Exception as e:  # noqa: BLE001
                     logger.error(f"❌ [Guild {guild_id}] Error polling guild: {e}", exc_info=True)
 
-                # These checks run every poll cycle regardless of new league match
-                try:
-                    # Playoff match check — fetch recent playoff matches and process any unseen ones
-                    settings = get_settings(guild_id)
-                    tracked_playoff_ids = get_tracked_playoff_match_ids(guild_id)
-                    last_playoff_id = settings.get("last_playoff_match_id") if settings else None
-
-                    playoff_matches = await fetch_all_matches(
-                        session, platform, club_id, max_count=10, match_type="playoffMatch"
-                    )
-
-                    if playoff_matches:
-                        # Process oldest-first so last_playoff_match_id ends up as the newest
-                        new_playoff_matches = []
-                        for pm in reversed(playoff_matches):
-                            pm_id = pm.get("matchId", str(pm.get("timestamp", 0)))
-                            if str(pm_id) not in {str(tid) for tid in tracked_playoff_ids} and str(pm_id) != str(last_playoff_id):
-                                new_playoff_matches.append(pm)
-
-                        if new_playoff_matches:
-                            # Fetch club name once for all embeds
-                            try:
-                                po_info, po_platform = await fetch_club_info(session, platform, club_id)
-                                if isinstance(po_info, dict):
-                                    po_club_info = po_info.get(str(club_id), {})
-                                elif isinstance(po_info, list):
-                                    po_club_info = next((e for e in po_info if str(e.get("clubId")) == str(club_id)), {})
-                                else:
-                                    po_club_info = {}
-                                po_club_name = po_club_info.get("name", f"Club {club_id}")
-                            except Exception:
-                                po_club_name = f"Club {club_id}"
-                                po_platform = platform
-
-                            po_channel = None
-                            try:
-                                po_channel = self.get_channel(int(channel_id))
-                                if po_channel is None:
-                                    po_channel = await self.fetch_channel(int(channel_id))
-                            except Exception as ch_err:
-                                logger.error(f"[Guild {guild_id}] [Playoffs] Failed to get channel: {ch_err}")
-
-                            for pm in new_playoff_matches:
-                                pm_id = pm.get("matchId", str(pm.get("timestamp", 0)))
-                                logger.info(f"[Guild {guild_id}] [Playoffs] Playoff match detected: {pm_id}")
-
-                                # Post embed
-                                if po_channel:
-                                    try:
-                                        playoff_embed = build_match_embed(
-                                            club_id, po_platform, pm, "playoffMatch",
-                                            club_name_hint=po_club_name,
-                                        )
-                                        await po_channel.send(embed=playoff_embed)
-                                        logger.info(f"✅ [Guild {guild_id}] [Playoffs] Posted playoff match {pm_id}")
-                                    except Exception as playoff_post_err:
-                                        logger.error(f"[Guild {guild_id}] [Playoffs] Failed to post playoff match: {playoff_post_err}", exc_info=True)
-
-                                # Update last playoff match ID
-                                set_last_playoff_match_id(guild_id, str(pm_id))
-
-                                # Track monthly stats (POTM) for playoff matches too
-                                process_league_match_monthly(guild_id, pm, club_id)
-
-                                # Process playoff stats
-                                await process_playoff_match(self, guild_id, pm, "playoffMatch", club_id)
-                except EAApiForbiddenError as e:
-                    self._ea_forbidden_until[int(guild_id)] = time.time() + EA_FORBIDDEN_COOLDOWN_SECONDS
-                    logger.error(
-                        f"[Guild {guild_id}] [Playoffs] EA API returned 403 ({e.path}). "
-                        f"Pausing this guild for {EA_FORBIDDEN_COOLDOWN_SECONDS}s before retry."
-                    )
-                except Exception as playoff_err:
-                    logger.error(f"[Guild {guild_id}] [Playoffs] Error checking playoff matches: {playoff_err}", exc_info=True)
 
 
 client = ProClubsBot()
