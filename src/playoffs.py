@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from database import (
     get_playoff_stats, has_playoff_been_announced, mark_playoff_announced,
     count_playoff_matches, get_settings, record_playoff_match, get_playoff_club_stats,
-    update_playoff_stats
+    update_playoff_stats, update_player_match_history
 )
 from utils.ea_api import interpret_match_result
 
@@ -238,6 +238,15 @@ async def process_playoff_match(client, guild_id: int, match_data: dict, match_t
                 
                 # Update playoff player stats
                 update_playoff_stats(guild_id, player_name, playoff_period, goals, assists, rating)
+
+                # Also update match history so playoff matches appear in /statsovertime
+                position = (player_data.get("pos") or player_data.get("position") or
+                           player_data.get("posSorted") or "Unknown")
+                update_player_match_history(
+                    guild_id, player_name, str(match_id),
+                    goals, assists, clean_sheet, position, result,
+                    rating=rating,
+                )
         
         # Check if playoffs are complete
         if check_playoff_completion(guild_id, playoff_period):

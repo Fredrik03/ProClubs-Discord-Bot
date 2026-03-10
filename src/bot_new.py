@@ -501,6 +501,9 @@ class ProClubsBot(discord.Client):
                             # Update last playoff match ID
                             set_last_playoff_match_id(guild_id, str(playoff_match_id))
 
+                            # Track monthly stats (POTM) for playoff matches too
+                            process_league_match_monthly(guild_id, playoff_match, club_id)
+
                             # Process playoff stats
                             await process_playoff_match(self, guild_id, playoff_match, playoff_mt, club_id)
                 except EAApiForbiddenError as e:
