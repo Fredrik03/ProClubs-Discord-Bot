@@ -954,13 +954,12 @@ async def playoffsummary(interaction: discord.Interaction):
     await interaction.followup.send(embed=embed)
 
 
-@client.tree.command(name="backfillplayoffstats", description="Retroactively process playoff matches for POTM and match history")
+@client.tree.command(name="backfillplayoffstats", description="Reset and rebuild monthly stats from all matches (league + playoff)")
 async def backfillplayoffstats(interaction: discord.Interaction):
     """
     Command: /backfillplayoffstats
-    One-time command to retroactively process already-tracked playoff matches
-    through monthly stats and match history. Achievements/milestones will
-    trigger naturally on the next match.
+    Clears monthly stats for the current period and rebuilds from ALL matches
+    (league + playoff) from the EA API. Also backfills match history.
     """
     await interaction.response.defer()
     guild_id = interaction.guild_id
@@ -976,29 +975,38 @@ async def backfillplayoffstats(interaction: discord.Interaction):
     async with aiohttp.ClientSession(timeout=HTTP_TIMEOUT) as session:
         await warmup_session(session)
 
-        # Fetch all playoff matches from API
-        params = {
-            "platform": platform,
-            "clubIds": str(club_id),
-            "maxResultCount": "50",
-            "matchType": "playoffMatch",
-        }
-        try:
-            data = await fetch_json(session, "/clubs/matches", params)
-        except Exception as e:
-            await interaction.followup.send(f"Failed to fetch playoff matches: {e}")
+        # Fetch league and playoff matches
+        all_matches = []
+        for mt in ("leagueMatch", "playoffMatch"):
+            params = {
+                "platform": platform,
+                "clubIds": str(club_id),
+                "maxResultCount": "50",
+                "matchType": mt,
+            }
+            try:
+                data = await fetch_json(session, "/clubs/matches", params)
+                matches = data if isinstance(data, list) else data.get("matches", [])
+                all_matches.extend(matches)
+            except Exception as e:
+                logger.warning(f"[Backfill] Failed to fetch {mt}: {e}")
+
+        if not all_matches:
+            await interaction.followup.send("No matches found in the EA API.")
             return
 
-        matches = data if isinstance(data, list) else data.get("matches", [])
-        if not matches:
-            await interaction.followup.send("No playoff matches found in the EA API.")
-            return
+        # Clear monthly stats for this guild so we rebuild cleanly
+        import sqlite3
+        from database import DB_PATH
+        with sqlite3.connect(DB_PATH) as db:
+            db.execute("DELETE FROM monthly_stats WHERE guild_id=?", (guild_id,))
+            db.commit()
 
-        # Process oldest first
-        matches.reverse()
+        # Sort by timestamp (oldest first)
+        all_matches.sort(key=lambda m: int(m.get("timestamp", 0)))
 
         processed = 0
-        for match in matches:
+        for match in all_matches:
             match_id = match.get("matchId", "unknown")
             clubs = match.get("clubs", {})
             our_club = clubs.get(str(club_id), {})
@@ -1034,7 +1042,7 @@ async def backfillplayoffstats(interaction: discord.Interaction):
             processed += 1
 
     await interaction.followup.send(
-        f"Backfilled **{processed}** playoff matches into POTM and match history."
+        f"Rebuilt monthly stats from **{processed}** matches (league + playoff)."
     )
 
 
