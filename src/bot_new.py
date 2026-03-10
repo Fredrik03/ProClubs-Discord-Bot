@@ -995,11 +995,13 @@ async def backfillplayoffstats(interaction: discord.Interaction):
             await interaction.followup.send("No matches found in the EA API.")
             return
 
-        # Clear monthly stats for this guild so we rebuild cleanly
+        # Clear monthly stats for CURRENT MONTH only so we rebuild cleanly
+        # (older months are unaffected — the API can't go back that far anyway)
+        current_month = datetime.now(timezone.utc).strftime("%Y-%m")
         import sqlite3
         from database import DB_PATH
         with sqlite3.connect(DB_PATH) as db:
-            db.execute("DELETE FROM monthly_stats WHERE guild_id=?", (guild_id,))
+            db.execute("DELETE FROM monthly_stats WHERE guild_id=? AND month_period=?", (guild_id, current_month))
             db.commit()
 
         # Sort by timestamp (oldest first)
